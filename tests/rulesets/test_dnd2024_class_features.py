@@ -26,6 +26,15 @@ MONK_FEATURES_AT_TWO = (
     "martial_arts", "monks_focus", "flurry_of_blows", "patient_defense",
     "step_of_the_wind",
 )
+MONK_FEATURE_IDS = frozenset({"martial_arts", *MONK_FEATURES_AT_TWO})
+MONK_CAPABILITY_IDS = frozenset({
+    "bonus_unarmed_strike",
+    "flurry_of_blows",
+    "patient_defense",
+    "patient_defense_focus",
+    "step_of_the_wind",
+    "step_of_the_wind_focus",
+})
 
 
 def _resolver(locale: str = "en") -> tuple[Dnd2024Runtime, Dnd2024ClassFeatureResolver]:
@@ -91,8 +100,15 @@ def test_non_monk_characters_never_own_monk_features(preset_id: str) -> None:
         None, {**preset["draft"], "locale": "en", "name": preset_id},
     )
 
-    assert resolver.features_for(sheet["ruleset_character"]) == ()
-    assert resolver.combat_capabilities(sheet["ruleset_character"], {"bonus_action": 1}) == ()
+    owned = [feature.id for feature in resolver.features_for(sheet["ruleset_character"])]
+    declared = {
+        capability.id for capability in resolver.combat_capabilities(
+            sheet["ruleset_character"], {"bonus_action": 1},
+        )
+    }
+
+    assert set(owned).isdisjoint(MONK_FEATURE_IDS)
+    assert declared.isdisjoint(MONK_CAPABILITY_IDS)
     assert sheet["ruleset_character"]["resources"]["class"].get("focus_points") is None
 
 
@@ -327,3 +343,78 @@ def test_feature_and_rest_declarations_agree() -> None:
             assert entry.source_ref == str(spec["source_ref"])
             assert entry.short_rest == spec.get("short", "none")
             assert entry.long_rest == spec.get("long", "none")
+
+
+# --------------------------------------------------------------------------
+# Second Wind (Slice 1): heal primitive declaration, progression, and rest
+# --------------------------------------------------------------------------
+
+
+def _fighter(level: int, **extra) -> dict:
+    return _character(level, "class:fighter", **extra)
+
+
+def test_fighter_second_wind_declaration_and_capability_load() -> None:
+    _runtime, resolver = _resolver()
+    character = _fighter(1, resources={
+        "class": {"second_wind": {"current": 2, "maximum": 2}},
+    })
+
+    assert [feature.id for feature in resolver.features_for(character)] == ["second_wind"]
+    capability = resolver.declared_capability(character, "second_wind")
+
+    assert capability is not None
+    assert capability.requires_hostile_target is False
+    assert capability.cost.action == "bonus_action"
+    assert [
+        (cost.resource_id, cost.amount) for cost in capability.cost.resources
+    ] == [("second_wind", 1)]
+    assert [
+        (action.kind, action.count) for action in capability.actions
+    ] == [("heal", 1)]
+    assert resolver.feature_value(character, "second_wind", "heal_dice") == "1d10"
+    assert resolver.feature_value(character, "second_wind", "heal_bonus") == 1
+    assert resolver.catalog.label("second_wind") == "Second Wind"
+
+
+def test_second_wind_labels_follow_the_bundle_locale() -> None:
+    _runtime, chinese = _resolver("zh-CN")
+
+    assert chinese.catalog.label("fighter") == "战士"
+    assert chinese.catalog.label("second_wind") == "回气"
+
+
+def _rest_character(level: int) -> dict:
+    return {
+        "build": {"class_levels": [{"class_ref": "class:fighter", "level": level}]},
+        "abilities": {"str": 16, "dex": 12, "con": 14, "int": 10, "wis": 10, "cha": 8},
+        "resources": {"hp": 12, "max_hp": 24, "hit_dice": {"d10": level}},
+    }
+
+
+@pytest.mark.parametrize("level,maximum", [(1, 2), (4, 3), (10, 4)])
+def test_second_wind_maximum_follows_the_progression_track(
+    level: int, maximum: int,
+) -> None:
+    runtime = Dnd2024Runtime()
+    engine = Dnd2024RestEngine(runtime.load_bundle("en"))
+
+    synced = engine.sync_resources(_rest_character(level))
+    resource = synced["resources"]["class"]["second_wind"]
+
+    assert resource["maximum"] == maximum
+    assert resource["current"] == maximum
+
+
+def test_second_wind_recovers_one_use_on_a_short_rest_and_all_on_a_long_rest() -> None:
+    runtime = Dnd2024Runtime()
+    engine = Dnd2024RestEngine(runtime.load_bundle("en"))
+    character = engine.sync_resources(_rest_character(4))
+    character["resources"]["class"]["second_wind"]["current"] = 0
+
+    short_rested = engine.complete_short_rest(character)["character"]
+    assert short_rested["resources"]["class"]["second_wind"]["current"] == 1
+
+    short_rested["resources"]["class"]["second_wind"]["current"] = 0
+    long_rested = engine.complete_long_rest(short_rested)["character"]
+    assert long_rested["resources"]["class"]["second_wind"]["current"] == 3

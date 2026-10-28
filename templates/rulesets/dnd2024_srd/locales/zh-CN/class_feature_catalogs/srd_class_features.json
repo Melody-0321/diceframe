@@ -21,7 +21,9 @@
       "action": "动作",
       "bonus_action": "附赠动作",
       "paladin": "圣武士",
-      "paladins_smite": "圣武士斩击（免费至圣斩）"
+      "paladins_smite": "圣武士斩击（免费至圣斩）",
+      "fighter": "战士",
+      "second_wind": "回气"
     }
   }
 }

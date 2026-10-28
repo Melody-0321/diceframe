@@ -19,7 +19,9 @@
     "action": "Action",
     "bonus_action": "Bonus Action",
     "paladin": "Paladin",
-    "paladins_smite": "Paladin’s Smite"
+    "paladins_smite": "Paladin’s Smite",
+    "fighter": "Fighter",
+    "second_wind": "Second Wind"
   },
   "classes": {
     "monk": {
@@ -122,6 +124,30 @@
             "granted_spell_id": "divine_smite"
           },
           "resource_id": "paladins_smite"
+        }
+      ]
+    },
+    "fighter": {
+      "source_ref": "srd-5.2.1:p47:fighter-features",
+      "features": [
+        {
+          "id": "second_wind",
+          "minimum_level": 1,
+          "source_ref": "srd-5.2.1:p48:second-wind",
+          "summary": "Bonus Action: regain HP equal to 1d10 plus your Fighter level. You have two uses (three at Fighter level 4, four at level 10); regain one use on a Short Rest and all uses on a Long Rest.",
+          "parameters": {
+            "heal_dice": "1d10",
+            "heal_bonus_track": "second_wind_heal_bonus"
+          },
+          "resource_id": "second_wind",
+          "capabilities": [
+            {
+              "id": "second_wind",
+              "cost": {"bonus_action": 1, "resources": [{"id": "second_wind", "amount": 1}]},
+              "requires_hostile_target": false,
+              "actions": [{"kind": "heal", "count": 1}]
+            }
+          ]
         }
       ]
     }

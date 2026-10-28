@@ -499,6 +499,29 @@ class CombatResolutionMixin:
                 events.extend(self._basic_action_events(
                     combat, action.kind, actor_id, spend_action=False,
                 ))
+            elif action.kind == "heal":
+                # 特性声明的治疗骰 + 等级加值；事件形状与法术治疗分支一致。
+                character = self._feature_character(actor)
+                dice = str(self.features.feature_value(
+                    character, capability.feature_id, "heal_dice", "",
+                ) or "")
+                bonus = int(self.features.feature_value(
+                    character, capability.feature_id, "heal_bonus", 0,
+                ) or 0)
+                healing_node = formula_node_from_dice_formula(dice)
+                if bonus:
+                    healing_node = {"op": "add", "args": [
+                        healing_node, {"op": "constant", "value": bonus},
+                    ]}
+                healing, rolls = roll_damage_node(healing_node, rng)
+                healing = max(1, healing)
+                blocked = "cannot_regain_hp" in actor["conditions"]
+                events.append({
+                    "type": "resource.changed", "resource": "hp", "target_id": actor_id,
+                    "delta": 0 if blocked else healing, "amount": 0 if blocked else healing,
+                    "healing": True, "rolls": rolls,
+                    **({"blocked_by": "cannot_regain_hp"} if blocked else {}),
+                })
             else:  # pragma: no cover - catalog validation guards this
                 raise CombatIntentError("unsupported class capability action")
         return events

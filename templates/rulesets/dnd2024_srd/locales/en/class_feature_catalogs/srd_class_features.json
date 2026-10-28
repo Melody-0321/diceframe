@@ -21,7 +21,9 @@
       "action": "Action",
       "bonus_action": "Bonus Action",
       "paladin": "Paladin",
-      "paladins_smite": "Paladin’s Smite"
+      "paladins_smite": "Paladin’s Smite",
+      "fighter": "Fighter",
+      "second_wind": "Second Wind"
     }
   }
 }
