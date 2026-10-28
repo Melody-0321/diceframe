@@ -104,6 +104,12 @@ def restore_completion_before_image(instance: Any, before: dict[str, Any]) -> No
     economy_state.replace_state(instance, before["economy"])
 
 
+def discard_completion_suggestion(instance: Any, node_id: str) -> None:
+    """Remove one rejected narrator proposal through the adventure owner."""
+
+    adventure_runtime_state.clear_completion_suggestion(instance, node_id)
+
+
 def initialize_adventure_run(
     dependencies: AdventureRuntimeDependencies, instance: Any,
 ) -> dict[str, Any]:
@@ -418,6 +424,7 @@ __all__ = [
     "advance_adventure_world",
     "adventure_graph",
     "complete_adventure_node",
+    "discard_completion_suggestion",
     "initialize_adventure_new_run",
     "initialize_adventure_run",
     "restore_completion_before_image",
