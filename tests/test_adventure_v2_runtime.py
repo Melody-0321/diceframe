@@ -463,6 +463,32 @@ def test_time_advance_settles_the_process_and_opens_the_consequence_node(tmp_pat
     assert adventure_runtime.advance_adventure_world(deps, instance)["activated_nodes"] == []
 
 
+def test_time_advance_cannot_reopen_nodes_after_an_ending(tmp_path) -> None:
+    resolver = _install(tmp_path, _graph())
+    instance = _instance(resolver)
+    deps = _deps(resolver)
+    adventure_runtime.initialize_adventure_run(deps, instance)
+    adventure_runtime.complete_adventure_node(deps, instance, "gate")
+
+    # Simulate a persisted ending reached after the gate was completed. The
+    # successor is eligible, but an ending must freeze the whole adventure.
+    progress = adventure_runtime_state.progress(instance)
+    progress["ending_node_id"] = "finale"
+    progress["active_nodes"] = []
+    progress["choice_requests"] = []
+    restored = GameInstance.from_dict(instance.to_dict())
+
+    result = adventure_runtime.advance_adventure_world(deps, restored)
+
+    assert result == {
+        "ok": True,
+        "advanced": False,
+        "reason": "ended",
+        "activated_nodes": [],
+    }
+    assert adventure_runtime_state.progress(restored)["active_nodes"] == []
+
+
 # ---- §6.9 D&D runtime ------------------------------------------------------
 
 
