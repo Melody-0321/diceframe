@@ -46,6 +46,13 @@
 | **触发式反应已存在（仅法术）**：Shield 的受击反应决策流、Divine Smite 的 `triggered_damage` 命中追加；"命中 → 弹决策 → 花反应 → 结算"闭环完整 | `src/rulesets/dnd2024/combat/reaction_spells.py`、`triggered_spells.py` |
 | 伤害公式 AST 无加成注入点（无 rage / sneak attack 类条件伤害） | `src/rulesets/dnd2024/combat/action_adapter.py` |
 
+**法术侧原语核查（2026-10-29 补，逐条分类见 `design/SPELL_GAP_MATRIX.md`）**：
+
+- 308 条无效果法术逐条归类：~40 条可纯数据直填、56 条几何依赖（AoE 22 + zone 34，归阶段三后）、68 条战斗外叙事层、其余 ~144 条需 P1–P13 原语管线；
+- **点名制多目标不需要 2D**：`validation.py` 已支持 `target_ids` 列表（bless 3 目标先例）；只有几何 AoE（按位置圈人）依赖地图；
+- **condition 目前不阻止行动**：`incapacitated` 只是标记，回合跳过只认 `dead`/`stable`——hold 系缺"门控"而非"回合接管"；
+- 阶段一 5 个切片对法术缺口几乎无净贡献（heal 与 triggered_damage 是既有能力的职业侧复用），法术需要独立的原语切片序列。
+
 ### C. 战术地图层
 
 | 事实 | 位置 |
@@ -87,12 +94,36 @@
 - 优势劣势冲突规则从"多来源相消"升级为 5e RAW 的"优劣势各自计数"（改 `check_modes.py` 时注意）；
 - 优势来源要推广到豁免/检定，现仅覆盖攻击掷骰。
 
+### 阶段 1B：法术原语垂直切片（2026-10-29 新增）
+
+动机：法术缺口（308 条）与职业特性是同构问题——先铺原语、再填数据。阶段一的切片只服务职业特性，法术需要自己的原语序列。逐条分类与完整清单见 `design/SPELL_GAP_MATRIX.md`。
+
+| # | 切片（代表法术垂直验证） | 打通的原语 |
+|---|---|---|
+| P1 | invisibility | attack_sources 数据驱动（感官修正，偿还 `check_modes` 硬编码债） |
+| P2 | hold_person | condition 行动门控 + 每回合豁免 tick |
+| P3 | scorching_ray | 多目标/多 beam 结算循环（`target_ids` 校验已有） |
+| P4 | false_life | temp HP / max HP 修改 |
+| P5 | stoneskin | 伤害类型抗性/免疫（同时偿还 Rage 抗性裁剪债） |
+| P6 | misty_step | 1D 位移 + 速度修改 |
+| P7 | counterspell | 施法反应（切片 3 反应管线换触发源） |
+| P8 | dispel_magic | 魔法 condition 移除 |
+| P9 | revivify | 复活（dead → 存活） |
+
+工程约束与阶段一相同（原语先行、fail closed、任务书/白名单/停止条件/执行报告协议）。P1–P9 合计约点亮 60+ 条法术，加上 review 桶 13 条快速人工确认与直填管线后续批次，完成后 1–5 级团法术体验基本完整（"直填 ~40 条免人工"的原估计已被原型推翻，见阶段二管线实证）。P10（属性检定）/P11（召唤）/P12（变形）/P13（回合接管）为大件，放阶段二后段与职业填充交错。
+
 ### 阶段二：内容批量填充（A 层）
 
 1. 以切片 1–5 沉淀的 schema 为模板，把 12 职业的幽灵 id 逐个补进 `class_feature_catalog`（name / summary / parameters / capabilities）；
-2. 数据源：open5e / dnd5eapi 的 CC-BY SRD 5.2 JSON，映射到 canonical ref 时逐条过 `contracts.py` 校验；
-3. 架构解耦（独立 PR，勿与数据填充混合）：把 spells / progression / class_feature 从硬编码 `srd_*` 改为 source-aware 目录，参照 `content/catalog.py` 已有模式与 `ContentRefChain`；
-4. 仓库内明确 `LICENSE`（AGPL 代码）与内容署名（CC-BY）的分层边界。
+2. **法术填充走生成器管线**（原型已验证：`scripts/rulesets/import_dnd5eapi_spell_effects.py`，快照与产物在 git 排除的 `.imports/`）：
+   - 四层：获取（dnd5eapi 2014+2024 快照，CC-BY 署名）→ 映射（2014 骨架 + 2024 补充，fail-closed）→ 核对（`.rulebooks` 2024 原文骰式 + 语义关键词三层防线）→ 分批验收（contracts + 装载测试全过、行为测试抽样、按桶分批提交）；
+   - **原型实证（2026-10-29，直填桶 46 条）**：auto=0 / review=13 / manual=33——没有一条可不经人眼入库；机器的真实产出是"13 条带完整草稿的快速人工确认（补 condition/rider 字段）+ 33 条带精确原因的人工处理"（其中 16 条 P 原语等待、5 条 P2 tick/区域硬阻断）；
+   - 三层防线缺一不可（原型过程实证）：无数值核对 → 2014 数值污染（cure-wounds 1d8 vs 2d8）；无语义扫描 → "数值正确的错误模式"（初版 18 条假 auto，如 hunter_s_mark 附伤被误判直伤）；无锚点检查 → API 2024 字段残缺误判（mind_spike 无 dc 字段实为 Wis 豁免）；
+   - 2014→2024 差异坑实录：acid_arrow 新增回合结束延迟伤害（P2）、harm 改为降生命值上限、shining_smite 改名+施法时机改命中后、规则书保留人名前缀（Melf's）而 SRD 5.2.1 canonical id 去除（别名表处理）；
+   - 语义关键词是启发式：降级方向永远保守正确，但原因标签可能不准（如光照半径误标"区域语义"），人工复核以规则书原文为准；
+3. 数据源：open5e / dnd5eapi 的 CC-BY SRD 5.2 JSON，映射到 canonical ref 时逐条过 `contracts.py` 校验；
+4. 架构解耦（独立 PR，勿与数据填充混合）：把 spells / progression / class_feature 从硬编码 `srd_*` 改为 source-aware 目录，参照 `content/catalog.py` 已有模式与 `ContentRefChain`；
+5. 仓库内明确 `LICENSE`（AGPL 代码）与内容署名（CC-BY）的分层边界。
 
 ### 阶段三：战术地图层（C 层）
 
@@ -118,14 +149,16 @@ MapBackground（已有）      +   token 渲染层（前端新增）
 | 一 | 切片 1：Second Wind（heal 原语） | ✅ 2026-10-28 执行完成并审核通过（任务书 v3；改动在 `feat/second-wind` 工作区待提交） |
 | 一 | 切片 2：Rage（effect 实例 + 加成 + 优势来源） | ✅ 完成（任务书 v2，分支 `feat/rage`；`requires/forbidden_condition` schema、`established` 保证轮生命周期、str 豁免优势、track 加值均已测试锁定） |
 | 一 | 切片 3：Uncanny Dodge（触发泛化 + 伤害修正窗口） | ✅ 完成（任务书 v2，分支 `feat/uncanny-dodge`；`hit_reaction` 决策泛化到特性选项、伤害减半、AI 自动选择、人类玩家按钮均已测试/构建锁定） |
-| 一 | 切片 4：Action Surge（经济事件） | ⬜ 未开始 |
+| 一 | 切片 4：Action Surge（economy 授予） | ✅ 完成（任务书 v2，分支 `feat/action-surge`；`economy.granted` 通用授予事件、surge_action 独立经济 key、once_per_turn 通用字段、支付优先级、施法结构性排除均已测试锁定） |
 | 一 | 切片 5：Sneak Attack（谓词伤害） | ⬜ 未开始 |
-| 二 | 12 职业 catalog 批量填充 | ⬜ 未开始 |
+| 1B | 法术原语切片 P1–P9（矩阵见 `design/SPELL_GAP_MATRIX.md`） | ⬜ 未开始（建议顺序 P1→P5→P2→P3→P4→P6→P8→P7→P9，P1–P5 为法术/特性共用底座优先） |
+| 二 | 法术批量填充管线（原型已验证，review 13 + manual 33 待处理） | 🔄 原型完成（`scripts/rulesets/import_dnd5eapi_spell_effects.py`） |
 | 二 | spells / progression / class_feature source-aware 解耦 | ⬜ 未开始 |
 | 二 | 许可分层声明（AGPL 代码 / CC-BY 内容） | ⬜ 未开始 |
 | 三 | positions 升级 2D + token 渲染层 | ⬜ 未开始 |
 | 三 | 拖拽 → move intent 交互 | ⬜ 未开始 |
 | 三 | 迷雾 / 墙 / 光照（远期） | ⬜ 未开始 |
+| 三后 | 几何 AoE / zone 管线（56 条法术依赖，见矩阵） | ⬜ 未开始（zone 按"位置区间"抽象可与 1D 共用） |
 
 状态图例：⬜ 未开始 / 🔶 进行中 / ✅ 已完成（完成后附 PR 或 commit 链接）。
 
@@ -157,6 +190,16 @@ MapBackground（已有）      +   token 渲染层（前端新增）
   3. `resolution.py`/`validation.py`/`engine.py` 零改动——`_decision_events` 已把全部 `HIT_REACTION_DECISION` 路由到 `_finish_hit_reaction`，就地扩展即可；`_automatic_hit_reaction` 实际归属 `reaction_spells.py` 而非 engine.py。
 - 教训（对后续任务书的要求）：**"服务端已验证"不等于"玩家可用"**——凡新增玩家可选择的行为，任务书必须显式回答"哪个人类玩家的哪次点击会触发它"，并据此决定前端是否在白名单内。后续 Action Surge（经济事件）、Sneak Attack 同样需要前端入口，写任务书时一并确认。
 
+### 切片 4 审核记录（2026-10-29）
+
+- 验收复跑通过：`test_dnd2024_class_features.py` 51 passed；`-k action_surge` 11 passed；rulesets 全量 480 passed + 11 failed 均为已知上游豁免（`test_dnd2024_character_builder.py`）。
+- 白名单合规：8 个白名单文件 + 报告豁免。另有 4 个前端文件与主计划被 `git status` 标记 M，逐一 `git diff --stat` 核实为零内容差异（CRLF/LF 行尾噪音）与本会话 planner 更新，非执行端越权。
+- 三条硬性语义全部锁定：**施法结构性排除**（surge_action 不在施法支付域，伪造 cast_spell intent 被拒）、**短休/长休恢复**（rest_catalog 既有声明零触碰）、**每回合一次**（once_per_turn flag 经 `_fresh_economy` 整字典替换天然重置，回合推进即恢复；17 级双资源场景已测）。
+- 执行端两处偏离（均已接受）：①攻击支付的实际事件类型是 `dnd2024.attack.spent` 而非通用 action.spent，`resource` 字段落点在 engine.py `_attack_cost_event`（任务书 v1 误指 `_attack_events`）；②`_stabilize_events` 同步改支付选择——stabilize 走独立事件构建路径，任务书 v1 遗漏，不改则 surge 后 stabilize 被拒。
+- 架构质量：`economy.granted` 是通用授予事件（grants/flags 双载荷 + `_GRANTABLE_ECONOMY` 白名单校验 + 未知 key/负值/bool fail-closed），非 action_surge 专用分支；`once_per_turn` 是 FeatureCapability 通用字段，切片 5 Sneak Attack 可直接复用。
+- 切片 3 教训闭环：任务书 v1 正面回答了"哪个人类玩家的哪次点击"——surge 走既有 capability 按钮，surge 后 attack 等按钮因门控放宽重新出现在投影中，前端零改动成立。
+- 教训（对后续任务书的要求）：**支付/经济类规格必须先枚举同一支付域的全部消费路径**（attack、basic actions、stabilize、施法各走独立事件构建），逐路径声明改不改、怎么改；本切片靠执行端补全 stabilize 路径，属于任务书规格漏项。
+
 ## 待定决策
 
 | # | 决策点 | 选项 | 当前倾向 |
@@ -171,3 +214,4 @@ MapBackground（已有）      +   token 渲染层（前端新增）
 - 架构事实来源：`docs/ARCHITECTURE_CN.md`、`docs/ENGINEERING_RULES.md`（§15 Testing 为硬门槛）
 - 代码导览：`docs/wiki/05-rulesets-and-content.md`、`docs/wiki/10-key-reference.md`
 - 协作流程：`CONTRIBUTING.md`（前端必须 npm 10；后端 `pytest -q --cov=src` 离线可跑）
+- 法术缺口逐条分类：`docs/internal/design/SPELL_GAP_MATRIX.md`（2026-10-29，308 条，P1–P13 原语映射）
