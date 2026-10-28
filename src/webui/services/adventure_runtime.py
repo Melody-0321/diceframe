@@ -91,6 +91,19 @@ def resolve_instance_adventure(
     return dependencies.resolve_binding(instance)
 
 
+def restore_completion_before_image(instance: Any, before: dict[str, Any]) -> None:
+    """Restore an automatic-completion transaction after persistence fails.
+
+    The application facade owns orchestration, while this module owns the
+    adventure progress/economy before-image writes.  Keeping the restore here
+    preserves the same authority boundary as normal node completion.
+    """
+
+    instance.world_state = before["world_state"]
+    adventure_runtime_state.replace_progress(instance, before["adventure_progress"])
+    economy_state.replace_state(instance, before["economy"])
+
+
 def initialize_adventure_run(
     dependencies: AdventureRuntimeDependencies, instance: Any,
 ) -> dict[str, Any]:
@@ -407,6 +420,7 @@ __all__ = [
     "complete_adventure_node",
     "initialize_adventure_new_run",
     "initialize_adventure_run",
+    "restore_completion_before_image",
     "resolve_instance_adventure",
     "request_adventure_choice",
 ]
