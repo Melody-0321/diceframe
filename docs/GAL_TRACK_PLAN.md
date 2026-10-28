@@ -52,6 +52,10 @@ gal = 组合：freeform 系规则皮 + affection 模块槽 + Adventure 图（补
 |---|---|---|---|
 | P0 | 契约与守卫：`play_mode` 增 `gal`（创建流接受 / 校验，fail-closed）；玩法模式 transport 声明 `bot_surface`；绑定准入单点检查（现有跑团 = full，行为不变）；`tests/architecture/` 守卫：generic path 无具体玩法分支、bot bridge 与插件无玩法词表。纯契约，gal 尚不可玩 | 无 | `services/game_lifecycle.py`、`routes/pairing.py` / bind 命令、`tests/architecture/` |
 | P1 | **v0 gal 预览**：gal 规则皮 JSON（照 tavern_free）；创建流入口（实验性标注）；现有 GameTimeline / 头像 / TTS / swipe 呈现。无好感度、无路线锁、无结局，仅需求验证，不作为正式功能宣传 | P0 | `templates/rules/`、创建流前端 |
+| P0.5a | 玩法注册表外移：`src/gameplays/`（contracts / builtin / trpg / gal 包），bot surface 与创建校验归注册表，`game_lifecycle.py` 不再内联 gal 分支；守卫 `test_gameplay_packages.py`。行为不变 | P1 | `src/gameplays/`、`adventure_runtime_state.py`、`game_lifecycle.py` |
+| P0.5b | **推迟**（ADR-0012 §3）：玩法 id 迁入独立 `gameplay` 模块槽、实例 schema +1。gal 绑定路线图不依赖它（P4 / P6 时只改 gal 创建校验）；出现确实需要的消费方时再做 | P0.5a | `src/gameplays/`、`engine/modules/`、`migrations/instance.py` |
+| P0.5c | 推进驱动接缝：`RoundProcessor` 原样登记为跑团 `narrative_round` 驱动，回合入口按玩法分发；跑团全绿为验收 | P0.5a | `src/gameplays/`、`commands/game_handler.py` |
+| P0.5d | 前端按玩法分发视图：`/play` 入口从注册表选视图，新建 `features/gal/` 骨架；`PlayView.vue` 不加 gal 分支 | P0.5a | `frontend-v2/src/features/game-profiles/`、`features/gal/` |
 | P2 | affection 模块槽：五件套（状态 / codec / 迁移 / 投影 / 测试），按当前模块槽 + lifecycle hooks 模式（#525–#532 之后的模板），实例 schema +1；relation 数值投影供 gates；TRPG 侧 NPC 态度复用同一模块 | P0 | `engine/modules/affection.py`、`migrations/instance.py`、`tests/` |
 | P3 | affection 结算权威：prompt 注入好感状态；模型提议 → 引擎校验钳制结算（仿 economy proposal）；拒绝路径与测试 | P2 | `engine/affection_*`、`commands/`、prompt 组装 |
 | P4 | Adventure ending 语义（已实施）：NODE_TYPES 增 `ending`；结局节点不得有 transitions / 选择，`on_complete` 不得再完成其它节点；完成结局节点记录 `progress.ending_node_id`，关闭其余开放节点与选择请求，此后任何节点不可再完成。不升图 schema：旧运行时不认识该类型会整图拒绝（fail closed）。投影带 `ended`（所有人）与 `ending_node_id`（仅结局对该视角可见时）；场景上下文提示叙事者只写结局与尾声，隐藏结局不泄露文本。"达成即终局"止于冒险进度；对局本身的结束（run finale）由 P6 / P7 驱动 | 无（可与 P2/P3 并行） | `src/adventures/graph_v2.py`、`progress.py`、`scene_context.py`、`webui/services/adventures.py` |

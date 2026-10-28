@@ -16,6 +16,8 @@ from src.engine.game_instance import GameState
 from src.engine.modules import adventure_runtime_state, content_binding, progression_state, room_access
 from src.content_modules.refs import ContentRef, ContentRefError, parse_content_ref
 from src.engine.language import DEFAULT_LANGUAGE, normalize_language
+from src.gameplays.builtin import DEFAULT_GAMEPLAYS
+from src.gameplays.contracts import GameplayCreateRequest
 from src.engine.narrative_perspective import validate_narrative_perspective
 from src.engine.story import validate_story_mode
 from src.engine import module_hooks
@@ -208,20 +210,16 @@ async def create_game(
     normalized_play_mode = str(play_mode or "").strip().casefold()
     if not normalized_play_mode:
         normalized_play_mode = "adventure" if str(adventure_id or "").strip() else "free"
-    if normalized_play_mode not in adventure_runtime_state.PLAY_MODES:
+    gameplay = DEFAULT_GAMEPLAYS.get(normalized_play_mode)
+    if gameplay is None:
         return {"ok": False, "error": "玩法模式无效"}
-    if normalized_play_mode == "gal":
-        if not solo:
-            return {"ok": False, "error_code": "GAL_REQUIRES_SOLO", "error": "GAL 玩法只能创建单人局"}
-        if str(rule_id or "").strip() != "gal_narrative":
-            return {"ok": False, "error_code": "GAL_REQUIRES_NARRATIVE_RULE", "error": "GAL 玩法必须使用 gal_narrative 叙事规则"}
-        # GAL P7：v0 预览时代的"不能绑定冒险包"限制解除——结构化 galgame
-        # 形态（路线图 + gates + P6 自动确认 + P4 结局）已就位，gal 局可绑
-        # Adventure v2 图作为女主路线。
-    if normalized_play_mode == "adventure" and not str(adventure_id or "").strip():
-        return {"ok": False, "error": "冒险包剧情模式必须选择冒险包"}
-    if normalized_play_mode == "free" and str(adventure_id or "").strip():
-        return {"ok": False, "error": "标准自由对局不能绑定冒险包"}
+    gameplay_rejection = gameplay.validate_create(GameplayCreateRequest(
+        solo=bool(solo),
+        rule_id=str(rule_id or "").strip(),
+        adventure_id=str(adventure_id or "").strip(),
+    ))
+    if gameplay_rejection is not None:
+        return gameplay_rejection.as_response()
 
     unique_id = f"{world_id}_{time.time_ns()}"
     game_key = ("web", unique_id, "web_bot")
@@ -384,10 +382,9 @@ async def create_game(
     # opening generation so the generation path sees the selected mode.
     module_hooks.record(instance, module_hooks.STORY_MODE, normalized_story_mode)
     adventure_runtime_state.replace_play_mode(instance, normalized_play_mode)
-    # GAL P7：gal 玩法安装 scene 推进（无回合屏障、按场景/事件推进）；
-    # 跑团玩法保持 narrative_round 不变。
-    if normalized_play_mode == "gal":
-        progression_state.set_mode(instance, progression_state.SCENE)
+    # The gameplay package owns the progression contract; the lifecycle only
+    # installs the declared capability and never branches on a concrete mode.
+    progression_state.set_mode(instance, gameplay.progression_mode)
     # FIX-04 §6.5/§6.6：v2 冒险在同一创建事务里初始化进度并原子物化世界种子；
     # 失败即整体回滚（不留下 partial save / partial world）。
     if callable(getattr(dependencies, "initialize_adventure_run", None)):

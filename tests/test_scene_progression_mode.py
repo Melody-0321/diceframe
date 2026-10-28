@@ -165,11 +165,15 @@ async def test_gal_creation_installs_scene_mode(web_api):
 
 @pytest.mark.asyncio
 async def test_gal_creation_no_longer_refuses_adventure_binding(web_api):
-    """v0 的 GAL_CANNOT_BIND_ADVENTURE 限制已解除（结构化形态就位）。"""
+    """GAL + a real Adventure v2 package reaches the resolver and is created."""
 
     import json
+    from dataclasses import replace
 
-    api, _lorebook, _registry, _fake_llm, _worlds_dir = web_api
+    from src.adventures import AdventureResolver
+    from tests.test_adventure_v2_runtime import _graph, _package_files
+
+    api, _lorebook, registry, _fake_llm, _worlds_dir = web_api
     (api._rules_dir / "gal_narrative.json").write_text(
         json.dumps({
             "rule_id": "gal_narrative",
@@ -179,10 +183,54 @@ async def test_gal_creation_no_longer_refuses_adventure_binding(web_api):
         }, ensure_ascii=False),
         encoding="utf-8",
     )
+    adventure_root = api._reg.save_dir.parent / "test-adventures"
+    package = adventure_root / "v2_quest"
+    files = _package_files(_graph())
+    manifest = json.loads(files["manifest.json"])
+    manifest["required_runtime"] = {"id": "core:adventure", "minimum_version": 1}
+    files["manifest.json"] = json.dumps(manifest).encode("utf-8")
+    for name, payload in files.items():
+        target = package / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+    resolver = AdventureResolver.single_directory(adventure_root, source_kind="user")
+    api._adventure_resolver = resolver
+    api._adventure_loader = resolver
+    api._adventure_source_registry = resolver.registry
+    api._adventure_dependencies = replace(
+        api._adventure_dependencies,
+        adventure_loader=resolver,
+        adventure_registry=resolver.registry,
+        adventure_resolver=resolver,
+    )
+    api._ruleset_registry.set_adventure_resolver(resolver)
+
     result = await api.create_game(
         "template_world", "GAL 绑图", rule_id="gal_narrative", play_mode="gal",
-        solo=True, adventure_id="user:some_quest",
+        solo=True, adventure_id="user:v2_quest",
         players=[{"character_name": "叙事者", "attributes": {}}],
     )
-    # 冒险包可能不存在而创建失败，但绝不能是旧的玩法限制。
-    assert result.get("error_code") != "GAL_CANNOT_BIND_ADVENTURE"
+    assert result.get("ok"), result
+    assert result["adventure_binding"]["format"] == "diceframe:adventure-graph-v2"
+    inst = registry.get(api._parse_key(result["game_key"]))
+    assert progression_state.mode(inst) == "scene"
+
+    # An incompatible v1 package fails closed before a registry/save entry is
+    # materialized, and never falls back to the removed GAL rejection.
+    bad_package = adventure_root / "bad_v1"
+    bad_files = dict(files)
+    bad_manifest = dict(manifest)
+    bad_manifest.update({"adventure_id": "user:bad_v1", "format": "diceframe:adventure-graph-v1"})
+    bad_files["manifest.json"] = json.dumps(bad_manifest).encode("utf-8")
+    for name, payload in bad_files.items():
+        target = bad_package / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+    before = {item.game_key for item in registry.list_all()}
+    rejected = await api.create_game(
+        "template_world", "GAL bad", rule_id="gal_narrative", play_mode="gal",
+        solo=True, adventure_id="user:bad_v1",
+        players=[{"character_name": "叙事者", "attributes": {}}],
+    )
+    assert rejected["error_code"] == "INCOMPATIBLE_ADVENTURE"
+    assert {item.game_key for item in registry.list_all()} == before
