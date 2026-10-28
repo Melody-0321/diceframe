@@ -452,21 +452,34 @@ async def _settle_adventure_completion(
         return
     if not isinstance(settlement, dict) or not settlement.get("node_id"):
         return
-    transition = str(settlement.get("transition_narration") or "")
-    if not transition:
+    # Confirmation is the authoritative state mutation.  Persist it even when
+    # transition narration is disabled, empty, or failed; narration is only a
+    # presentation side effect and must never decide whether progress reaches
+    # disk.
+    if run_changed is not None and run_changed():
+        logger.error(
+            "节点完成已确认但当前 run 已替换，未写入旧实例: game=%s; 需要恢复检查",
+            game_key,
+        )
         return
+    transition = str(settlement.get("transition_narration") or "")
     latest_round = int(progression_state.round_value(instance)) - 1
-    for entry in reversed(instance.log):
-        if not (isinstance(entry, dict) and int(entry.get("round") or 0) == latest_round):
-            continue
-        changes = entry.setdefault("state_changes", [])
-        if isinstance(changes, list):
-            changes.append(transition)
-            try:
-                await dependencies.save_instance(instance)
-            except Exception:
-                logger.exception("场景过渡叙事存档失败: game=%s", game_key)
-        break
+    if transition:
+        for entry in reversed(instance.log):
+            if not (isinstance(entry, dict) and int(entry.get("round") or 0) == latest_round):
+                continue
+            changes = entry.setdefault("state_changes", [])
+            if isinstance(changes, list):
+                changes.append(transition)
+            break
+    try:
+        await dependencies.save_instance(instance)
+    except Exception:
+        logger.error(
+            "节点完成权威状态已更新但持久化失败，需恢复后重试: game=%s",
+            game_key,
+            exc_info=True,
+        )
 
 
 def _round_message(instance: "GameInstance", texts: dict[str, str]) -> str:

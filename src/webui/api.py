@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.engine.modules import economy_state
+from src.engine.modules import adventure_runtime_state, economy_state
 from src.assistant_agent_limits import DEFAULT_TASK_MAX_TOKENS
 from src.generation_limits import DEFAULT_TEXT_GEN_MAX_TOKENS
 
@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import time
+from copy import deepcopy
 from pathlib import Path
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
@@ -2603,12 +2604,46 @@ class WebAPI:
                     raise RuntimeError("historical rewrite is in progress")
                 if self._reg.get(instance.game_key) is not instance:
                     raise RuntimeError("game run was replaced")
-                return adventure_runtime.complete_adventure_node(
-                    self._adventure_runtime_dependencies,
-                    instance,
-                    node_id,
-                    actor_uid="narrator-auto",
-                )
+                before = {
+                    "world_state": deepcopy(instance.world_state),
+                    "adventure_progress": deepcopy(adventure_runtime_state.progress(instance)),
+                    "economy": deepcopy(economy_state.state(instance)),
+                }
+                try:
+                    result = adventure_runtime.complete_adventure_node(
+                        self._adventure_runtime_dependencies,
+                        instance,
+                        node_id,
+                        actor_uid="narrator-auto",
+                    )
+                    # Persist the authority mutation before narration runs.  A
+                    # failed save restores the full before-image so the
+                    # proposal remains recoverable and can be retried.
+                    await self._reg.save(instance)
+                    return result
+                except BaseException:
+                    instance.world_state = before["world_state"]
+                    adventure_runtime_state.replace_progress(
+                        instance, before["adventure_progress"],
+                    )
+                    economy_state.replace_state(instance, before["economy"])
+                    raise
+
+        async def discard(node_id: str) -> None:
+            """Drop a rejected proposal under the same authority boundary.
+
+            A failed confirmation still mutates the proposal queue.  Keep that
+            cleanup serialized with node completion and persist it immediately;
+            otherwise a restart can resurrect a proposal rejected in memory.
+            """
+
+            async with instance.authoritative_write() as write_entered, instance._lock:
+                if not write_entered:
+                    raise RuntimeError("historical rewrite is in progress")
+                if self._reg.get(instance.game_key) is not instance:
+                    raise RuntimeError("game run was replaced")
+                adventure_runtime_state.clear_completion_suggestion(instance, node_id)
+                await self._reg.save(instance)
 
         narration_fn = None
         if getattr(config, "activation_narration", False):
@@ -2623,7 +2658,11 @@ class WebAPI:
                 )
 
         settlement = await adventure_effects.settle_adventure_completion(
-            instance, config=config, confirm=confirm, narration=narration_fn,
+            instance,
+            config=config,
+            confirm=confirm,
+            discard=discard,
+            narration=narration_fn,
         )
         if settlement is None:
             return None
