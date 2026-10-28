@@ -502,3 +502,46 @@ def test_rage_recovers_one_use_on_a_short_rest_and_all_on_a_long_rest() -> None:
     short_rested["resources"]["class"]["rages"]["current"] = 0
     long_rested = engine.complete_long_rest(short_rested)["character"]
     assert long_rested["resources"]["class"]["rages"]["current"] == 2
+
+
+# --------------------------------------------------------------------------
+# Uncanny Dodge (Slice 3): reaction-triggered capability declaration
+# --------------------------------------------------------------------------
+
+
+def _rogue(level: int, **extra) -> dict:
+    return _character(level, "class:rogue", **extra)
+
+
+def test_rogue_uncanny_dodge_declaration_and_capability_load() -> None:
+    _runtime, resolver = _resolver()
+    character = _rogue(5)
+
+    assert [feature.id for feature in resolver.features_for(character)] == ["uncanny_dodge"]
+    capability = resolver.declared_capability(character, "uncanny_dodge")
+
+    assert capability is not None
+    assert capability.requires_hostile_target is False
+    assert capability.cost.action == ""
+    assert [
+        (cost.resource_id, cost.amount) for cost in capability.cost.resources
+    ] == [("reaction", 1)]
+    assert [
+        (action.kind, action.count) for action in capability.actions
+    ] == [("uncanny_dodge", 1)]
+    assert resolver.feature_value(character, "uncanny_dodge", "damage_multiplier") == 0.5
+    assert resolver.catalog.label("uncanny_dodge") == "Uncanny Dodge"
+
+
+def test_uncanny_dodge_is_not_owned_below_level_five() -> None:
+    _runtime, resolver = _resolver()
+
+    assert resolver.features_for(_rogue(4)) == ()
+    assert resolver.declared_capability(_rogue(4), "uncanny_dodge") is None
+
+
+def test_uncanny_dodge_labels_follow_the_bundle_locale() -> None:
+    _runtime, chinese = _resolver("zh-CN")
+
+    assert chinese.catalog.label("rogue") == "游荡者"
+    assert chinese.catalog.label("uncanny_dodge") == "直觉闪避"

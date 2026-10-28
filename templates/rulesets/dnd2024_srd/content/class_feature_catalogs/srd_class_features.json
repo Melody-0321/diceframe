@@ -24,7 +24,9 @@
     "second_wind": "Second Wind",
     "barbarian": "Barbarian",
     "rage": "Rage",
-    "rage_sustain": "Sustain Rage"
+    "rage_sustain": "Sustain Rage",
+    "rogue": "Rogue",
+    "uncanny_dodge": "Uncanny Dodge"
   },
   "classes": {
     "monk": {
@@ -180,6 +182,28 @@
               "requires_hostile_target": false,
               "requires_condition": "rage",
               "actions": [{"kind": "rage_sustain", "count": 1}]
+            }
+          ]
+        }
+      ]
+    },
+    "rogue": {
+      "source_ref": "srd-5.2.1:p61:rogue-features",
+      "features": [
+        {
+          "id": "uncanny_dodge",
+          "minimum_level": 5,
+          "source_ref": "srd-5.2.1:p63:uncanny-dodge",
+          "summary": "When an attacker that you can see hits you with an attack, you can use your Reaction to halve the attack's damage against you (rounded down).",
+          "parameters": {
+            "damage_multiplier": 0.5
+          },
+          "capabilities": [
+            {
+              "id": "uncanny_dodge",
+              "cost": {"resources": [{"id": "reaction", "amount": 1}]},
+              "requires_hostile_target": false,
+              "actions": [{"kind": "uncanny_dodge", "count": 1}]
             }
           ]
         }
