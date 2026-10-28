@@ -2622,11 +2622,7 @@ class WebAPI:
                     await self._reg.save(instance)
                     return result
                 except BaseException:
-                    instance.world_state = before["world_state"]
-                    adventure_runtime_state.replace_progress(
-                        instance, before["adventure_progress"],
-                    )
-                    economy_state.replace_state(instance, before["economy"])
+                    adventure_runtime.restore_completion_before_image(instance, before)
                     raise
 
         async def discard(node_id: str) -> None:
