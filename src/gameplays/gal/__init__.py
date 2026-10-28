@@ -20,8 +20,10 @@ def _validate_create(request: GameplayCreateRequest) -> GameplayCreateRejection 
         return GameplayCreateRejection("GAL 玩法只能创建单人局", "GAL_REQUIRES_SOLO")
     if request.rule_id != GAL_RULE_ID:
         return GameplayCreateRejection("GAL 玩法必须使用 gal_narrative 叙事规则", "GAL_REQUIRES_NARRATIVE_RULE")
-    if request.adventure_id:
-        return GameplayCreateRejection("GAL 玩法不能绑定冒险包", "GAL_CANNOT_BIND_ADVENTURE")
+    # Adventure format/runtime compatibility is validated by the lifecycle
+    # resolver after the mode contract runs.  Keeping this validator concerned
+    # only with GAL's own invariants lets Adventure v2 bindings reach that
+    # authoritative fail-closed boundary.
     return None
 
 

@@ -108,6 +108,18 @@ def test_every_mode_declares_a_valid_bot_surface() -> None:
     assert DEFAULT_GAMEPLAYS.bot_surface("werewolf") == contracts.BOT_SURFACE_NONE
 
 
+def test_gal_mode_delegates_adventure_compatibility_to_lifecycle() -> None:
+    gal = DEFAULT_GAMEPLAYS.get("gal")
+    assert gal is not None
+    assert gal.validate_create(
+        contracts.GameplayCreateRequest(
+            solo=True,
+            rule_id="gal_narrative",
+            adventure_id="user:v2-quest",
+        )
+    ) is None
+
+
 @pytest.mark.parametrize(
     "mode_id,surface",
     [("", "full"), ("Gal", "full"), ("has-dash", "full"), ("ok", "everything")],
