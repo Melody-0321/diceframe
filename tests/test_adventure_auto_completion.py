@@ -14,10 +14,16 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.adventures.outcomes import OutcomeError
+from src.adventures.progress import ProgressError
 from src.commands import adventure_effects
-from src.commands.adventure_effects import settle_adventure_completion
+from src.commands.adventure_effects import (
+    AdventureCompletionRejected,
+    settle_adventure_completion,
+)
 from src.rules.adventure_progression_config import parse_adventure_progression_config
 from src.rules.rule_system import RuleSystem
+from src.webui.services import adventure_runtime
 from tests.test_adventure_v2_runtime import _deps, _install, _instance
 
 
@@ -74,8 +80,6 @@ QUEST_GRAPH = {
 
 
 def _settled_game(tmp_path, *, config=None):
-    from src.webui.services import adventure_runtime
-
     resolver = _install(tmp_path, QUEST_GRAPH)
     instance = _instance(resolver)
     runtime_deps = _deps(resolver)
@@ -86,9 +90,12 @@ def _settled_game(tmp_path, *, config=None):
     })
 
     async def confirm(node_id: str) -> dict:
-        return adventure_runtime.complete_adventure_node(
-            runtime_deps, instance, node_id, actor_uid="narrator-auto",
-        )
+        try:
+            return adventure_runtime.complete_adventure_node(
+                runtime_deps, instance, node_id, actor_uid="narrator-auto",
+            )
+        except (adventure_runtime.AdventureRuntimeError, ProgressError, OutcomeError) as exc:
+            raise AdventureCompletionRejected(str(exc)) from exc
 
     return instance, confirm
 
@@ -369,6 +376,61 @@ async def test_rejected_proposal_uses_authority_bound_discard_callback(tmp_path)
     assert settlement is None
     assert discarded == ["ghost"]
     assert _suggestions(instance) == []
+
+
+@pytest.mark.asyncio
+async def test_retryable_confirmation_failure_keeps_proposal_for_retry(tmp_path):
+    instance, confirm = _settled_game(tmp_path, config=ON)
+    _suggest(instance, "start")
+    calls = 0
+    discarded: list[str] = []
+
+    async def flaky_confirm(node_id: str) -> dict:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("temporary save failure")
+        return await confirm(node_id)
+
+    async def discard(node_id: str) -> None:
+        discarded.append(node_id)
+
+    first = await settle_adventure_completion(
+        instance, config=ON, confirm=flaky_confirm, discard=discard,
+    )
+    assert first is None
+    assert discarded == []
+    assert _suggestions(instance)
+
+    second = await settle_adventure_completion(
+        instance, config=ON, confirm=flaky_confirm, discard=discard,
+    )
+    assert second is not None and second.node_id == "start"
+    assert discarded == []
+    assert _suggestions(instance) == []
+
+    from src.engine.modules.adventure_runtime_state import progress
+
+    assert progress(instance)["completed_nodes"] == ["start"]
+
+
+@pytest.mark.asyncio
+async def test_stale_confirmation_failure_keeps_proposal(tmp_path):
+    instance, _confirm = _settled_game(tmp_path, config=ON)
+    _suggest(instance, "start")
+    discarded: list[str] = []
+
+    async def stale(_node_id: str) -> dict:
+        raise RuntimeError("game run was replaced")
+
+    async def discard(node_id: str) -> None:
+        discarded.append(node_id)
+
+    assert await settle_adventure_completion(
+        instance, config=ON, confirm=stale, discard=discard,
+    ) is None
+    assert discarded == []
+    assert _suggestions(instance)
 
 
 def _fake_settle(node_id, activated, transition):

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from src.engine.modules import adventure_runtime_state, economy_state
+from src.adventures.outcomes import OutcomeError
+from src.adventures.progress import ProgressError
 from src.assistant_agent_limits import DEFAULT_TASK_MAX_TOKENS
 from src.generation_limits import DEFAULT_TEXT_GEN_MAX_TOKENS
 
@@ -2610,12 +2612,21 @@ class WebAPI:
                     "economy": deepcopy(economy_state.state(instance)),
                 }
                 try:
-                    result = adventure_runtime.complete_adventure_node(
-                        self._adventure_runtime_dependencies,
-                        instance,
-                        node_id,
-                        actor_uid="narrator-auto",
-                    )
+                    try:
+                        result = adventure_runtime.complete_adventure_node(
+                            self._adventure_runtime_dependencies,
+                            instance,
+                            node_id,
+                            actor_uid="narrator-auto",
+                        )
+                    except (
+                        adventure_runtime.AdventureRuntimeError,
+                        ProgressError,
+                        OutcomeError,
+                    ) as exc:
+                        raise adventure_effects.AdventureCompletionRejected(
+                            str(exc),
+                        ) from exc
                     # Persist the authority mutation before narration runs.  A
                     # failed save restores the full before-image so the
                     # proposal remains recoverable and can be retried.
@@ -2638,8 +2649,15 @@ class WebAPI:
                     raise RuntimeError("historical rewrite is in progress")
                 if self._reg.get(instance.game_key) is not instance:
                     raise RuntimeError("game run was replaced")
-                adventure_runtime.discard_completion_suggestion(instance, node_id)
-                await self._reg.save(instance)
+                before_progress = deepcopy(adventure_runtime_state.progress(instance))
+                try:
+                    adventure_runtime.discard_completion_suggestion(instance, node_id)
+                    await self._reg.save(instance)
+                except BaseException:
+                    adventure_runtime.restore_completion_progress_before_image(
+                        instance, before_progress,
+                    )
+                    raise
 
         narration_fn = None
         if getattr(config, "activation_narration", False):
