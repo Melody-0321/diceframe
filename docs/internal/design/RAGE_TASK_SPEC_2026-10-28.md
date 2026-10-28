@@ -121,10 +121,12 @@
 ### 3.4 `src/rulesets/dnd2024/combat/engine.py`
 
 1. `_available_class_capabilities`：按 capability 的 `requires_condition`/`forbidden_condition` 过滤（actor conditions 可从该层访问；参考 view.py `_feature_character` 的取法）。
-2. `_expire_conditions`：新增 rage 生命周期——当 `previous_actor_id` 是 rage 持有者且其回合刚结束时：
+2. `_expire_conditions`：新增 rage 生命周期——当 `previous_actor_id` 是 rage 持有者且其回合刚结束时（**v2 修正：加 `established` 保证轮**）：
+   - 若 `unconscious`：无条件移除；
+   - 若 `established` 为假（进入回合 N 刚结束）：置 `established = True`、清除 `sustained_this_turn`，**不移除**（规则保证狂暴持续至下个回合结束，第一轮存续与本回合是否攻击/延长无关）；
    - 若 `sustained_this_turn` 为真：清除该标记、`turns_remaining -= 1`，减到 0 移除；
-   - 否则移除 `rage`；
-   - 兜底：rage 持有者 `unconscious` 时无条件移除。
+   - 否则移除 `rage`。
+   v1 的规格缺少保证轮（进入回合不攻击即死，比规则提前一轮），执行端按 v1 实现后在审核中发现并修正，`condition.applied` 载荷相应补 `established: False`。
 
 ### 3.5 `src/rulesets/dnd2024/combat/validation.py`
 
@@ -217,3 +219,4 @@ git status   # 变更仅限白名单
 | 版本 | 日期 | 变更 |
 |---|---|---|
 | v1 | 2026-10-28 | 初版（依据规则书原文与源码勘察；progression/rest catalog 经核实零改动） |
+| v2 | 2026-10-29 | 审核期修正：§3.4.2 生命周期加 `established` 保证轮（v1 规格把续期检查提前到进入回合，违反"持续至你的下个回合结束"）；§3.8.5 数值错误（5 级 +2 非 +3，执行端已按 track 事实自我纠正）；§3.4.1 方法归属错误（`_available_class_capabilities` 实际定义于 view.py，执行端以 engine 同名覆写解决） |

@@ -116,7 +116,7 @@ MapBackground（已有）      +   token 渲染层（前端新增）
 | 零 | 三层差距核查（内容 / 原语 / 地图） | ✅ 2026-10-28 |
 | 零 | 本计划文档建立 | ✅ 2026-10-28 |
 | 一 | 切片 1：Second Wind（heal 原语） | ✅ 2026-10-28 执行完成并审核通过（任务书 v3；改动在 `feat/second-wind` 工作区待提交） |
-| 一 | 切片 2：Rage（effect 实例 + 加成 + 优势来源） | 🔶 任务书 v1 已发（`design/RAGE_TASK_SPEC_2026-10-28.md`），待执行 |
+| 一 | 切片 2：Rage（effect 实例 + 加成 + 优势来源） | ✅ 完成（任务书 v2，分支 `feat/rage`；`requires/forbidden_condition` schema、`established` 保证轮生命周期、str 豁免优势、track 加值均已测试锁定） |
 | 一 | 切片 3：Uncanny Dodge（触发泛化 + 伤害修正窗口） | ⬜ 未开始 |
 | 一 | 切片 4：Action Surge（经济事件） | ⬜ 未开始 |
 | 一 | 切片 5：Sneak Attack（谓词伤害） | ⬜ 未开始 |
@@ -136,6 +136,15 @@ MapBackground（已有）      +   token 渲染层（前端新增）
 - 执行偏差（已接受）：两条既有用例（`test_non_monk_characters_never_own_monk_features`、`test_non_monk_never_gets_monk_capabilities`）由"非 monk 角色无任何特性"收窄为"不含 monk 特性"（`isdisjoint`）。fighter 获得首个非 monk 特性后原断言前提失效，收窄保持原语义、未放宽新行为。
 - planner 侧修正：catalog `summary` 照抄了任务书 v1 模板的过时表述（PB 曲线 + 仅长休），已按 v3 规则语义改为固定次数表（2/3/4）+ 短休恢复 1。后续任务书修订时模板与 §1 语义必须同步。
 - 基线备忘（对后续切片的任务书要求）：`tests/rulesets/test_dnd2024_character_builder.py` 存在 11 个上游既有失败（10 × `unresolved reference 'ability:con' in background:soldier`，1 × 404），已用 HEAD worktree 对照证实与本切片无关。后续任务书的"基线全绿"条款应将其列为已知豁免。
+
+### 切片 2 审核记录（2026-10-29）
+
+- 验收复跑通过：`test_dnd2024_rage.py` 15 passed + `test_dnd2024_class_features.py` 44 passed（合计 59）；全仓库 `-k rage` 53 passed；rulesets 全量 11 failed 均为已知上游豁免。
+- 白名单合规：9 个白名单文件 + 报告豁免；progression/rest catalog、resolver、view、`frontend-v2/` 零触碰。
+- 执行端自我纠正（已接受）：任务书 §3.8.5 数值错误（5 级 +3，实际 1-8 级均 +2）按 track 事实实现；缺宿主法术问题以内存改 `sacred_flame` 的 save 属性解决（bundle 副本不落盘）。
+- 偏离 1（方法归属，已接受）：任务书把 `_available_class_capabilities` 指向 engine.py，实际定义在 view.py 的 mixin（view.py 是停止条件 6）。执行端在 engine 同名覆写（super() + 条件过滤），view.py 零改动，两个调用点语义正确。
+- planner 侧修正（审核中发现，已修）：**生命周期 off-by-one**——v1 规格"回合结束未续期即移除"把检查点提前到进入回合，违反规则"持续至你的下个回合结束"的第一轮保证。修正为 `established` 两段式：进入回合结束只确立（标记 + 清续期标记、不递减不移除），下个回合结束起才检查续期。连带 `condition.applied` 载荷、测试 6/7/8/9 断言。修正后昏迷联动测试才首次真正测到 reducer 的 pop 路径（原实现里 rage 在回合结束已死，该断言空转）。
+- 教训（对后续任务书的要求）：**生命周期类规格必须用逐回合时序表对照规则原文推演**（N 进入 → N 结束 → N+1 行动 → N+1 结束），再落笔实现规格；数值型断言（等级/加值）必须直接引用 §2 契约表的 track 值，不得凭记忆另写。
 
 ## 待定决策
 
