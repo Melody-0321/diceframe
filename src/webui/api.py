@@ -2638,7 +2638,7 @@ class WebAPI:
                     raise RuntimeError("historical rewrite is in progress")
                 if self._reg.get(instance.game_key) is not instance:
                     raise RuntimeError("game run was replaced")
-                adventure_runtime_state.clear_completion_suggestion(instance, node_id)
+                adventure_runtime.discard_completion_suggestion(instance, node_id)
                 await self._reg.save(instance)
 
         narration_fn = None
