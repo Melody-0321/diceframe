@@ -5,6 +5,7 @@ Start here when developing or using DiceFrame. The source in the checked-out rev
 ## Current contracts
 
 - Architecture: [English](ARCHITECTURE_EN.md) · [简体中文](ARCHITECTURE_CN.md)
+- Code Wiki (代码级导读): [docs/wiki](wiki/README.md)
 - [Engineering rules](ENGINEERING_RULES.md): ownership, authority, data, extensions and contract testing
 - [Accepted architecture decisions](adr/README.md): why durable boundaries were chosen
 - Content: [Adventure bundle](adventures/ADVENTURE_BUNDLE_EN.md), [lorebook adapter](LOREBOOK_ADAPTER_GUIDE.md), [content synchronization](content-sync/CONTRACT.md)
