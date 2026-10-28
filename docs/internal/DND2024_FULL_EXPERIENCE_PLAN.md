@@ -117,7 +117,7 @@ MapBackground（已有）      +   token 渲染层（前端新增）
 | 零 | 本计划文档建立 | ✅ 2026-10-28 |
 | 一 | 切片 1：Second Wind（heal 原语） | ✅ 2026-10-28 执行完成并审核通过（任务书 v3；改动在 `feat/second-wind` 工作区待提交） |
 | 一 | 切片 2：Rage（effect 实例 + 加成 + 优势来源） | ✅ 完成（任务书 v2，分支 `feat/rage`；`requires/forbidden_condition` schema、`established` 保证轮生命周期、str 豁免优势、track 加值均已测试锁定） |
-| 一 | 切片 3：Uncanny Dodge（触发泛化 + 伤害修正窗口） | ⬜ 未开始 |
+| 一 | 切片 3：Uncanny Dodge（触发泛化 + 伤害修正窗口） | ✅ 完成（任务书 v2，分支 `feat/uncanny-dodge`；`hit_reaction` 决策泛化到特性选项、伤害减半、AI 自动选择、人类玩家按钮均已测试/构建锁定） |
 | 一 | 切片 4：Action Surge（经济事件） | ⬜ 未开始 |
 | 一 | 切片 5：Sneak Attack（谓词伤害） | ⬜ 未开始 |
 | 二 | 12 职业 catalog 批量填充 | ⬜ 未开始 |
@@ -145,6 +145,17 @@ MapBackground（已有）      +   token 渲染层（前端新增）
 - 偏离 1（方法归属，已接受）：任务书把 `_available_class_capabilities` 指向 engine.py，实际定义在 view.py 的 mixin（view.py 是停止条件 6）。执行端在 engine 同名覆写（super() + 条件过滤），view.py 零改动，两个调用点语义正确。
 - planner 侧修正（审核中发现，已修）：**生命周期 off-by-one**——v1 规格"回合结束未续期即移除"把检查点提前到进入回合，违反规则"持续至你的下个回合结束"的第一轮保证。修正为 `established` 两段式：进入回合结束只确立（标记 + 清续期标记、不递减不移除），下个回合结束起才检查续期。连带 `condition.applied` 载荷、测试 6/7/8/9 断言。修正后昏迷联动测试才首次真正测到 reducer 的 pop 路径（原实现里 rage 在回合结束已死，该断言空转）。
 - 教训（对后续任务书的要求）：**生命周期类规格必须用逐回合时序表对照规则原文推演**（N 进入 → N 结束 → N+1 行动 → N+1 结束），再落笔实现规格；数值型断言（等级/加值）必须直接引用 §2 契约表的 track 值，不得凭记忆另写。
+
+### 切片 3 审核记录（2026-10-29）
+
+- 验收复跑通过：`test_dnd2024_uncanny_dodge.py` 7 passed + `test_dnd2024_class_features.py` 47 passed（合计 54）；rulesets 全量 11 failed 均为已知上游豁免；前端 `npm run build` 成功。
+- 白名单合规：后端 6 文件 + 测试 2 文件 + 报告豁免；随后按审核决定扩入前端 3 文件（见下条）。
+- **审核发现的真实缺陷（planner 侧规格错误，已修）**：v1 §6 禁止改动 `frontend-v2/`，但既有 `hit_reaction_spell` 决策卡只渲染"施放法术"与"放弃"两个按钮。游荡者没有法术时 `reactionSpells` 为空，"施放"按钮消失，人类玩家只剩"放弃"——**特性对真实玩家完全不可用**，只有 AI 托管/GM 代选能走通。已扩白名单补前端（`types.ts` 接口、决策卡按钮、五语种文案），构建通过。
+- 执行端三处偏离（均已接受）：
+  1. catalog 省略 `resource_id: "reaction"`——resolver `_validate_declarations` 要求 `resource_id` 必须在 rest_catalog 声明，而 reaction 是战斗期资源（§6 禁止写入 rest_catalog），保留该字段将导致整个规则集装载失败；
+  2. capability 成本用 `cost.resources` 表达——裸 `cost.reaction` 不被 `ACTION_COST_KINDS` 识别，会被静默忽略成"零成本"能力而暴露为可主动提交的动作；
+  3. `resolution.py`/`validation.py`/`engine.py` 零改动——`_decision_events` 已把全部 `HIT_REACTION_DECISION` 路由到 `_finish_hit_reaction`，就地扩展即可；`_automatic_hit_reaction` 实际归属 `reaction_spells.py` 而非 engine.py。
+- 教训（对后续任务书的要求）：**"服务端已验证"不等于"玩家可用"**——凡新增玩家可选择的行为，任务书必须显式回答"哪个人类玩家的哪次点击会触发它"，并据此决定前端是否在白名单内。后续 Action Surge（经济事件）、Sneak Attack 同样需要前端入口，写任务书时一并确认。
 
 ## 待定决策
 
