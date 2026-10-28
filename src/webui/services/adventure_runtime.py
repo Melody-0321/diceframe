@@ -111,6 +111,14 @@ def discard_completion_suggestion(instance: Any, node_id: str) -> None:
     adventure_runtime_state.clear_completion_suggestion(instance, node_id)
 
 
+def restore_completion_progress_before_image(
+    instance: Any, before_progress: dict[str, Any],
+) -> None:
+    """Restore proposal state when rejected-proposal persistence fails."""
+
+    adventure_runtime_state.replace_progress(instance, before_progress)
+
+
 def initialize_adventure_run(
     dependencies: AdventureRuntimeDependencies, instance: Any,
 ) -> dict[str, Any]:
@@ -439,4 +447,5 @@ __all__ = [
     "restore_completion_before_image",
     "resolve_instance_adventure",
     "request_adventure_choice",
+    "restore_completion_progress_before_image",
 ]

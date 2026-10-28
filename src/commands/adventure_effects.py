@@ -28,6 +28,11 @@ from src.engine.modules.adventure_runtime_state import (
 
 logger = logging.getLogger("trpg")
 
+
+class AdventureCompletionRejected(ValueError):
+    """The authority deterministically rejected a completion proposal."""
+
+
 # One authoritative auto-confirmation per settle pass. A transition narration
 # that itself proposes another completion must wait for the next round —
 # this caps any self-amplifying chain.
@@ -82,9 +87,9 @@ async def settle_adventure_completion(
             continue
         try:
             result = await confirm(node_id)
-        except Exception as exc:
-            # fail closed：确认失败 = 路线保持锁定，丢弃该提议（模型下轮可带
-            # 新证据重提）；complete 事务自身已恢复 before-image。
+        except AdventureCompletionRejected as exc:
+            # Only a deterministic domain rejection drops the proposal. Save,
+            # stale-run, rewrite and unknown failures keep it retryable.
             if discard is None:
                 # Direct callers without an authority adapter retain the old
                 # in-memory helper semantics; production wiring supplies the
@@ -97,6 +102,13 @@ async def settle_adventure_completion(
                 getattr(instance, "game_key", ""), node_id, exc,
             )
             continue
+        except Exception as exc:
+            logger.error(
+                "叙事者节点完成提议结算失败，保留提议以便重试: game=%s node=%s err=%s",
+                getattr(instance, "game_key", ""), node_id, exc,
+                exc_info=True,
+            )
+            return None
         confirmed += 1
         activated = [
             str(item) for item in (result or {}).get("activated_nodes") or []
