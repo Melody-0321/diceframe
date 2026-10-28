@@ -38,6 +38,7 @@ from src.adventures.progress import (
     complete_milestone,
     complete_node,
     complete_objective,
+    ending_node_id,
     new_progress,
     validate_choice_state,
 )
@@ -354,6 +355,14 @@ def advance_adventure_world(
     if not isinstance(progress, dict) or not progress:
         raise AdventureRuntimeError("adventure progress is not initialized")
     validate_choice_state(progress, graph)
+
+    # An ending freezes the adventure permanently. Keep this guard at the
+    # world-sync authority boundary so gate re-evaluation cannot reopen nodes
+    # after a reload or through another time/process advancement entry point.
+    if ending_node_id(progress):
+        progress["active_nodes"] = []
+        progress["choice_requests"] = []
+        return {"ok": True, "advanced": False, "reason": "ended", "activated_nodes": []}
 
     from src.adventures.gates import GateError, gates_satisfied
 
