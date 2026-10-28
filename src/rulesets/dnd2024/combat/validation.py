@@ -322,6 +322,23 @@ class CombatValidationMixin:
         capability_id = str(intent.get("capability_id") or "")
         if not capability_id:
             raise CombatIntentError("capability_id is required")
+        capability = self.features.declared_capability(
+            self._feature_character(actor), capability_id,
+        )
+        if capability is not None:
+            conditions = actor.get("conditions") or {}
+            required = capability.requires_condition
+            if required and required not in conditions:
+                raise CombatIntentError(
+                    f"{self.features.catalog.label(capability_id, capability_id)} requires "
+                    f"the {self.features.catalog.label(required, required)} condition"
+                )
+            forbidden = capability.forbidden_condition
+            if forbidden and forbidden in conditions:
+                raise CombatIntentError(
+                    f"{self.features.catalog.label(capability_id, capability_id)} cannot be "
+                    f"used while {self.features.catalog.label(forbidden, forbidden)} is active"
+                )
         views = {
             view.id: view
             for view in self._available_class_capabilities(
@@ -333,9 +350,6 @@ class CombatValidationMixin:
             raise CombatIntentError("class capability is not available to this actor")
         if not view.available:
             raise CombatIntentError(view.blocked_reason or "class capability is not available")
-        capability = self.features.declared_capability(
-            self._feature_character(actor), capability_id,
-        )
         if capability is None:  # pragma: no cover - availability already proved it
             raise CombatIntentError("class capability is not available to this actor")
         has_unarmed_strike = any(

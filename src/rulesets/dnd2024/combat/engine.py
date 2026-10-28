@@ -14,7 +14,10 @@ from src.rulesets.dnd2024.character.builder import ability_modifier
 from src.rulesets.dnd2024.character.reconciliation import merge_live_character_projection
 from src.rulesets.dnd2024.combat.catalog import Dnd2024CombatCatalog
 from src.rulesets.dnd2024.content.encounter import expand_encounter_enemies
-from src.rulesets.dnd2024.features import Dnd2024ClassFeatureResolver
+from src.rulesets.dnd2024.features import (
+    CombatCapabilityView,
+    Dnd2024ClassFeatureResolver,
+)
 from src.rulesets.dnd2024.play.contracts import EncounterAccess
 from src.rulesets.dnd2024.spells.catalog import Dnd2024SpellCatalog
 from src.rulesets.events import EventBatchError, apply_event_batch, stable_batch_id
@@ -82,6 +85,42 @@ class Dnd2024CombatEngine(
         if not isinstance(state.get("combat_history"), list):
             raise CombatIntentError("combat_history must be an array")
         return state
+
+    def _available_class_capabilities(
+        self, actor: dict[str, Any], economy: dict[str, Any],
+        *, include_unavailable: bool = False,
+    ) -> tuple[CombatCapabilityView, ...]:
+        """Feature capabilities with the actor's live conditions applied.
+
+        A capability that requires a condition the actor does not hold, or that
+        forbids one the actor currently holds, is never offered: Rage cannot be
+        re-entered while raging, and Sustain Rage is meaningless outside it.
+        """
+
+        views = super()._available_class_capabilities(
+            actor, economy, include_unavailable=include_unavailable,
+        )
+        if not views:
+            return views
+        character = self._feature_character(actor)
+        conditions = actor.get("conditions") or {}
+        usable: list[CombatCapabilityView] = []
+        for view in views:
+            capability = self.features.declared_capability(character, view.id)
+            if capability is None:
+                continue
+            if (
+                capability.requires_condition
+                and capability.requires_condition not in conditions
+            ):
+                continue
+            if (
+                capability.forbidden_condition
+                and capability.forbidden_condition in conditions
+            ):
+                continue
+            usable.append(view)
+        return tuple(usable)
 
     def available_intents(self, instance: Any, actor_id: str) -> list[dict[str, Any]]:
         state = self.initialize_state(instance)
@@ -1130,6 +1169,28 @@ class Dnd2024CombatEngine(
                         target_conditions.pop(condition_id, None)
                     else:
                         value["turns_remaining"] = remaining - 1
+        if previous_actor_id:
+            # Rage 的回合级生命周期。规则保证狂暴"持续至你的下个回合结束"：
+            # 进入回合结束时只把状态标记为已确立（第一轮无条件存续，本回合
+            # 是否攻击或延长都不影响）；从下个回合结束起，未续期即结束，
+            # 续期则消耗剩余轮数，归零即结束。昏迷则无条件结束。
+            previous_conditions = self._conditions(snapshot, combat, previous_actor_id)
+            rage = previous_conditions.get("rage")
+            if isinstance(rage, dict):
+                if "unconscious" in previous_conditions:
+                    previous_conditions.pop("rage", None)
+                elif not rage.get("established"):
+                    rage["established"] = True
+                    rage["sustained_this_turn"] = False
+                elif rage.get("sustained_this_turn"):
+                    remaining = int(rage.get("turns_remaining", 10) or 10) - 1
+                    if remaining <= 0:
+                        previous_conditions.pop("rage", None)
+                    else:
+                        rage["turns_remaining"] = remaining
+                        rage["sustained_this_turn"] = False
+                else:
+                    previous_conditions.pop("rage", None)
 
     @staticmethod
     def _last_hostile_defeated(

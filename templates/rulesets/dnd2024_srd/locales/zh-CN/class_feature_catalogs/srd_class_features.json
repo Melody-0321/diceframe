@@ -23,7 +23,10 @@
       "paladin": "圣武士",
       "paladins_smite": "圣武士斩击（免费至圣斩）",
       "fighter": "战士",
-      "second_wind": "回气"
+      "second_wind": "回气",
+      "barbarian": "野蛮人",
+      "rage": "狂暴",
+      "rage_sustain": "延长狂暴"
     }
   }
 }

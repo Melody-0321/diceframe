@@ -418,3 +418,87 @@ def test_second_wind_recovers_one_use_on_a_short_rest_and_all_on_a_long_rest() -
     short_rested["resources"]["class"]["second_wind"]["current"] = 0
     long_rested = engine.complete_long_rest(short_rested)["character"]
     assert long_rested["resources"]["class"]["second_wind"]["current"] == 3
+
+
+# --------------------------------------------------------------------------
+# Rage (Slice 2): sustained condition declaration, progression, and rest
+# --------------------------------------------------------------------------
+
+
+def _barbarian(level: int, **extra) -> dict:
+    return _character(level, "class:barbarian", **extra)
+
+
+def test_barbarian_rage_declaration_and_capabilities_load() -> None:
+    _runtime, resolver = _resolver()
+    character = _barbarian(1, resources={
+        "class": {"rages": {"current": 2, "maximum": 2}},
+    })
+
+    assert [feature.id for feature in resolver.features_for(character)] == ["rage"]
+    enter = resolver.declared_capability(character, "rage")
+    sustain = resolver.declared_capability(character, "rage_sustain")
+
+    assert enter is not None and sustain is not None
+    assert enter.requires_hostile_target is False
+    assert enter.forbidden_condition == "rage" and enter.requires_condition is None
+    assert enter.cost.action == "bonus_action"
+    assert [(cost.resource_id, cost.amount) for cost in enter.cost.resources] == [
+        ("rages", 1),
+    ]
+    assert [(action.kind, action.count) for action in enter.actions] == [("rage", 1)]
+    assert sustain.requires_condition == "rage" and sustain.forbidden_condition is None
+    assert sustain.cost.action == "bonus_action"
+    assert [(action.kind, action.count) for action in sustain.actions] == [
+        ("rage_sustain", 1),
+    ]
+    assert resolver.catalog.label("rage") == "Rage"
+    assert resolver.catalog.label("rage_sustain") == "Sustain Rage"
+
+
+@pytest.mark.parametrize("level,bonus", [(1, 2), (9, 3), (16, 4)])
+def test_rage_damage_follows_the_progression_track(level: int, bonus: int) -> None:
+    _runtime, resolver = _resolver()
+
+    assert resolver.feature_value(_barbarian(level), "rage", "rage_damage") == bonus
+
+
+def test_rage_labels_follow_the_bundle_locale() -> None:
+    _runtime, chinese = _resolver("zh-CN")
+
+    assert chinese.catalog.label("barbarian") == "野蛮人"
+    assert chinese.catalog.label("rage") == "狂暴"
+    assert chinese.catalog.label("rage_sustain") == "延长狂暴"
+
+
+@pytest.mark.parametrize("level,maximum", [(1, 2), (3, 3), (6, 4), (12, 5), (17, 6)])
+def test_rage_maximum_follows_the_progression_track(level: int, maximum: int) -> None:
+    runtime = Dnd2024Runtime()
+    engine = Dnd2024RestEngine(runtime.load_bundle("en"))
+
+    synced = engine.sync_resources({
+        "build": {"class_levels": [{"class_ref": "class:barbarian", "level": level}]},
+        "abilities": {"str": 16, "dex": 12, "con": 14, "int": 10, "wis": 10, "cha": 8},
+        "resources": {"hp": 12, "max_hp": 24, "hit_dice": {"d12": level}},
+    })
+
+    assert synced["resources"]["class"]["rages"]["maximum"] == maximum
+
+
+def test_rage_recovers_one_use_on_a_short_rest_and_all_on_a_long_rest() -> None:
+    runtime = Dnd2024Runtime()
+    engine = Dnd2024RestEngine(runtime.load_bundle("en"))
+    character = engine.sync_resources({
+        "build": {"class_levels": [{"class_ref": "class:barbarian", "level": 1}]},
+        "abilities": {"str": 16, "dex": 12, "con": 14, "int": 10, "wis": 10, "cha": 8},
+        "resources": {"hp": 12, "max_hp": 24, "hit_dice": {"d12": 1}},
+    })
+    assert character["resources"]["class"]["rages"]["maximum"] == 2
+    character["resources"]["class"]["rages"]["current"] = 0
+
+    short_rested = engine.complete_short_rest(character)["character"]
+    assert short_rested["resources"]["class"]["rages"]["current"] == 1
+
+    short_rested["resources"]["class"]["rages"]["current"] = 0
+    long_rested = engine.complete_long_rest(short_rested)["character"]
+    assert long_rested["resources"]["class"]["rages"]["current"] == 2

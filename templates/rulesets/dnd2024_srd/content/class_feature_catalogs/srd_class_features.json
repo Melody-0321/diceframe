@@ -21,7 +21,10 @@
     "paladin": "Paladin",
     "paladins_smite": "Paladin’s Smite",
     "fighter": "Fighter",
-    "second_wind": "Second Wind"
+    "second_wind": "Second Wind",
+    "barbarian": "Barbarian",
+    "rage": "Rage",
+    "rage_sustain": "Sustain Rage"
   },
   "classes": {
     "monk": {
@@ -146,6 +149,37 @@
               "cost": {"bonus_action": 1, "resources": [{"id": "second_wind", "amount": 1}]},
               "requires_hostile_target": false,
               "actions": [{"kind": "heal", "count": 1}]
+            }
+          ]
+        }
+      ]
+    },
+    "barbarian": {
+      "source_ref": "srd-5.2.1:p28:barbarian-features",
+      "features": [
+        {
+          "id": "rage",
+          "minimum_level": 1,
+          "source_ref": "srd-5.2.1:p28:rage",
+          "summary": "Bonus Action: enter a Rage. While raging, Strength attacks and Unarmed Strikes deal extra damage (see the Barbarian table), and your Strength saving throws have advantage. The Rage lasts until the end of your next turn; making an attack against an enemy, or using a Bonus Action, extends it for another turn, up to 10 turns. It ends early if you are Incapacitated. You regain one use on a Short Rest and all uses on a Long Rest.",
+          "parameters": {
+            "rage_damage_track": "rage_damage"
+          },
+          "resource_id": "rages",
+          "capabilities": [
+            {
+              "id": "rage",
+              "cost": {"bonus_action": 1, "resources": [{"id": "rages", "amount": 1}]},
+              "requires_hostile_target": false,
+              "forbidden_condition": "rage",
+              "actions": [{"kind": "rage", "count": 1}]
+            },
+            {
+              "id": "rage_sustain",
+              "cost": {"bonus_action": 1},
+              "requires_hostile_target": false,
+              "requires_condition": "rage",
+              "actions": [{"kind": "rage_sustain", "count": 1}]
             }
           ]
         }

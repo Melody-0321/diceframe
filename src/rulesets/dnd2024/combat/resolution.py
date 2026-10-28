@@ -103,6 +103,7 @@ class CombatResolutionMixin:
         target_id = str(intent["target_id"])
         actor = self._actor_view(instance, combat, actor_id)
         target = self._actor_view(instance, combat, target_id)
+        ability = ""
         if actor["kind"] in {"player", "companion"}:
             # Companion 是"己方角色"：武器与徒手攻击走玩家同一套目录/能力确定性链，
             # 不走 enemy attack profile。
@@ -179,6 +180,12 @@ class CombatResolutionMixin:
             "total": total, "target": target_ac, "success": hit, "critical": critical,
         }
         events.append(check_event)
+        if target["kind"] == "enemy" and "rage" in actor["conditions"]:
+            # 2024 狂暴：对敌人进行一次攻击检定即延长一轮，命中与否都算。
+            events.append({
+                "type": "dnd2024.condition.sustained", "target_id": actor_id,
+                "condition": "rage",
+            })
         if hit:
             # 伤害骰经通用公式 AST 求值（Issue 212）：主骰 → 附加骰（魔化）
             # → 属性修正；重击翻倍仍由本层在 AST 上显式表达。
@@ -193,6 +200,15 @@ class CombatResolutionMixin:
                 critical=critical,
                 extra_dice_formula=extra_dice,
             )
+            if ability == "str" and "rage" in actor["conditions"]:
+                # 狂暴加值只在力量攻击命中时附加到伤害，不影响攻击加值。
+                rage_damage = int(self.features.feature_value(
+                    self._feature_character(actor), "rage", "rage_damage", 0,
+                ) or 0)
+                if rage_damage:
+                    damage_node = {"op": "add", "args": [
+                        damage_node, {"op": "constant", "value": rage_damage},
+                    ]}
             damage, rolls = roll_damage_node(damage_node, rng)
             damage = max(0, damage)
             damage_event = {
@@ -291,17 +307,28 @@ class CombatResolutionMixin:
                 events.extend(self._consume_attack_conditions(actor_id, target_id, actor, target))
             elif mode == "saving_throw":
                 save_ability = str(effect["save"])
-                roll = int(rng.randint(1, 20))
+                # 2024 狂暴：力量豁免具有优势（双骰取高），其它属性仍为单骰。
+                rage_advantage = "rage" in target["conditions"] and save_ability == "str"
+                first = int(rng.randint(1, 20))
+                second = int(rng.randint(1, 20)) if rage_advantage else None
+                roll = max(first, second) if second is not None else first
                 bless = int(rng.randint(1, 4)) if "blessed" in target["conditions"] else 0
                 modifier = int(target["saving_throws"].get(save_ability, 0) or 0)
                 total = roll + modifier + bless
                 succeeded = total >= int(actor["spell_save_dc"])
-                events.append({
+                check_event = {
                     "type": "check.resolved", "kind": "saving_throw", "actor_id": target_id,
-                    "source_actor_id": actor_id, "ability": save_ability, "rolls": [roll],
+                    "source_actor_id": actor_id, "ability": save_ability,
+                    "rolls": [value for value in (first, second) if value is not None],
                     "natural": roll, "modifier": modifier, "bless_bonus": bless, "total": total,
                     "target": actor["spell_save_dc"], "success": succeeded,
-                })
+                }
+                if rage_advantage:
+                    check_event["advantage_mode"] = "advantage"
+                    check_event["advantage_sources"] = [
+                        {"code": "rage", "mode": "advantage"},
+                    ]
+                events.append(check_event)
                 if effect.get("damage"):
                     damage_node = spell_formula_node(
                         str(effect["damage"]), effect.get("upcast_damage"),
@@ -521,6 +548,20 @@ class CombatResolutionMixin:
                     "delta": 0 if blocked else healing, "amount": 0 if blocked else healing,
                     "healing": True, "rolls": rolls,
                     **({"blocked_by": "cannot_regain_hp"} if blocked else {}),
+                })
+            elif action.kind == "rage":
+                events.append({
+                    "type": "condition.applied", "target_id": actor_id,
+                    "condition": "rage", "duration": "rage", "turns_remaining": 10,
+                    "sustained_this_turn": False, "established": False,
+                    "source_actor_id": actor_id,
+                })
+            elif action.kind == "rage_sustain":
+                # 只刷新续期标记；``turns_remaining`` 由回合结束的到期检查递减，
+                # 延长一次不等于重置十轮上限。
+                events.append({
+                    "type": "dnd2024.condition.sustained", "target_id": actor_id,
+                    "condition": "rage",
                 })
             else:  # pragma: no cover - catalog validation guards this
                 raise CombatIntentError("unsupported class capability action")

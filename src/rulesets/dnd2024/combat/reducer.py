@@ -197,6 +197,13 @@ class CombatReducerMixin:
                 str(event["condition"]), None
             )
             return
+        if event_type == "dnd2024.condition.sustained":
+            conditions = self._conditions(snapshot, combat, str(event["target_id"]))
+            condition_id = str(event["condition"])
+            if condition_id not in conditions:
+                raise EventBatchError("sustained condition is not active")
+            conditions[condition_id]["sustained_this_turn"] = True
+            return
         if event_type == "dnd2024.spell.slot_spent":
             kind, raw_id = _actor_kind(str(event["actor_id"]))
             if kind not in {"player", "companion"}:
@@ -313,6 +320,8 @@ class CombatReducerMixin:
             conditions = character.setdefault("conditions", {})
             if resources["hp"] <= 0:
                 conditions["unconscious"] = {"source": "zero_hp"}
+                # 昏迷即失能：狂暴立即结束。
+                conditions.pop("rage", None)
                 death = conditions.setdefault("death_saves", {"successes": 0, "failures": 0})
                 if before == 0 and delta < 0:
                     death["failures"] = min(

@@ -23,7 +23,10 @@
       "paladin": "Paladin",
       "paladins_smite": "Paladin’s Smite",
       "fighter": "Fighter",
-      "second_wind": "Second Wind"
+      "second_wind": "Second Wind",
+      "barbarian": "Barbarian",
+      "rage": "Rage",
+      "rage_sustain": "Sustain Rage"
     }
   }
 }
