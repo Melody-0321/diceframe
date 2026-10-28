@@ -10,6 +10,12 @@ from src.rulesets.events import EventBatchError
 from .primitives import actor_kind as _actor_kind
 
 
+# 只有行动经济池可以被特性追加；其余 economy 字段（actor_id/speed/...）不是资源。
+_GRANTABLE_ECONOMY = frozenset({
+    "action", "bonus_action", "reaction", "movement", "surge_action",
+})
+
+
 class CombatReducerMixin:
     """Apply validated events to a detached authoritative snapshot."""
 
@@ -127,6 +133,23 @@ class CombatReducerMixin:
                 raise EventBatchError(f"combat resource is already spent: {resource}")
             combat["economy"][resource] = current - amount
             return
+        if event_type == "dnd2024.economy.granted":
+            economy = combat["economy"]
+            if str(event["actor_id"]) != str(economy.get("actor_id") or ""):
+                raise EventBatchError("economy grants belong to the current actor")
+            grants = event.get("grants") or {}
+            flags = event.get("flags") or {}
+            if not isinstance(grants, dict) or not isinstance(flags, dict):
+                raise EventBatchError("economy grant payload is invalid")
+            for key, amount in grants.items():
+                if str(key) not in _GRANTABLE_ECONOMY:
+                    raise EventBatchError(f"economy grant key is unknown: {key}")
+                if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
+                    raise EventBatchError("economy grant amount is invalid")
+                economy[str(key)] = int(economy.get(str(key), 0) or 0) + amount
+            for key, value in flags.items():
+                economy[str(key)] = value
+            return
         if event_type == "dnd2024.class_resource.spent":
             # 职业资源永远写在既有的 canonical resources.class 结构里，
             # 不新增第二套资源表，也不允许扣成负数。
@@ -153,11 +176,14 @@ class CombatReducerMixin:
             economy = combat["economy"]
             if int(economy.get("attacks_remaining", 0) or 0) > 0:
                 economy["attacks_remaining"] -= 1
-            elif int(economy.get("action", 0) or 0) > 0:
-                economy["action"] -= 1
-                economy["attacks_remaining"] = max(0, int(event["attacks_per_action"]) - 1)
             else:
-                raise EventBatchError("Attack action is already spent")
+                # 支付选择由 resolution 的单一入口决定：普通 action 先用完，
+                # 只有它耗尽时 Action Surge 的 surge_action 才支付攻击。
+                resource = str(event.get("resource") or "action")
+                if int(economy.get(resource, 0) or 0) < 1:
+                    raise EventBatchError("Attack action is already spent")
+                economy[resource] -= 1
+                economy["attacks_remaining"] = max(0, int(event["attacks_per_action"]) - 1)
             return
         if event_type == "dnd2024.movement.granted":
             combat["economy"]["movement"] = int(combat["economy"].get("movement", 0)) + int(

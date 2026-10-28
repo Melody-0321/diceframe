@@ -296,6 +296,10 @@ def _bad_cost_amount(catalog: dict) -> None:
     ] = 0
 
 
+def _bad_once_per_turn(catalog: dict) -> None:
+    catalog["classes"]["fighter"]["features"][1]["capabilities"][0]["once_per_turn"] = "yes"
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
@@ -305,6 +309,7 @@ def _bad_cost_amount(catalog: dict) -> None:
         _orphan_option,
         _undeclared_resource,
         _bad_cost_amount,
+        _bad_once_per_turn,
     ],
 )
 def test_malformed_feature_declarations_fail_closed(mutate) -> None:
@@ -382,6 +387,46 @@ def test_second_wind_labels_follow_the_bundle_locale() -> None:
 
     assert chinese.catalog.label("fighter") == "战士"
     assert chinese.catalog.label("second_wind") == "回气"
+
+
+def test_fighter_action_surge_declaration_and_capability_load() -> None:
+    _runtime, resolver = _resolver()
+    character = _fighter(2, resources={
+        "class": {"action_surge": {"current": 1, "maximum": 1}},
+    })
+
+    assert [feature.id for feature in resolver.features_for(character)] == [
+        "second_wind", "action_surge",
+    ]
+    capability = resolver.declared_capability(character, "action_surge")
+
+    assert capability is not None
+    assert capability.once_per_turn is True
+    assert capability.requires_hostile_target is False
+    assert capability.cost.action == ""
+    assert [
+        (cost.resource_id, cost.amount) for cost in capability.cost.resources
+    ] == [("action_surge", 1)]
+    assert [
+        (action.kind, action.count) for action in capability.actions
+    ] == [("action_surge", 1)]
+    assert resolver.catalog.label("action_surge") == "Action Surge"
+
+
+def test_action_surge_label_follows_the_bundle_locale() -> None:
+    _runtime, chinese = _resolver("zh-CN")
+
+    assert chinese.catalog.label("action_surge") == "动作如潮"
+
+
+def test_level_one_fighter_does_not_own_action_surge() -> None:
+    _runtime, resolver = _resolver()
+    character = _fighter(1, resources={
+        "class": {"second_wind": {"current": 2, "maximum": 2}},
+    })
+
+    assert [feature.id for feature in resolver.features_for(character)] == ["second_wind"]
+    assert resolver.declared_capability(character, "action_surge") is None
 
 
 def _rest_character(level: int) -> dict:

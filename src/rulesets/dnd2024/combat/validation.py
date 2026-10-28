@@ -280,12 +280,15 @@ class CombatValidationMixin:
             raise CombatIntentError("a stable actor does not make death saves")
         economy = combat.get("economy") or {}
         if intent_type in {"attack", "dash", "dodge", "disengage", "stabilize"}:
+            has_action = int(economy.get("action", 0) or 0) > 0 or int(
+                economy.get("surge_action", 0) or 0
+            ) > 0
             if intent_type == "attack":
-                if int(economy.get("action", 0) or 0) < 1 and int(
+                if not has_action and int(
                     economy.get("attacks_remaining", 0) or 0
                 ) < 1:
                     raise CombatIntentError("the Attack action is no longer available")
-            elif int(economy.get("action", 0) or 0) < 1:
+            elif not has_action:
                 raise CombatIntentError("the action has already been spent")
         if intent_type == "move":
             distance = intent.get("distance")

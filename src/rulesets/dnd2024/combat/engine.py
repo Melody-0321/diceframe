@@ -119,6 +119,10 @@ class Dnd2024CombatEngine(
                 and capability.forbidden_condition in conditions
             ):
                 continue
+            if capability.once_per_turn and economy.get(f"{capability.id}_used"):
+                # 同一回合第二次使用：与被 requires/forbidden_condition 过滤
+                # 的能力同等处理——不出现在可用列表，伪造请求也走同一条拒绝。
+                continue
             usable.append(view)
         return tuple(usable)
 
@@ -215,7 +219,7 @@ class Dnd2024CombatEngine(
         actions: list[dict[str, Any]] = []
         if int(economy.get("action", 0) or 0) > 0 or int(
             economy.get("attacks_remaining", 0) or 0
-        ) > 0:
+        ) > 0 or int(economy.get("surge_action", 0) or 0) > 0:
             weapons = self._available_attacks(actor)
             if weapons:
                 actions.append({
@@ -347,9 +351,11 @@ class Dnd2024CombatEngine(
             str(target["actor_id"]),
         ))
         economy = combat.get("economy") or {}
-        can_act = int(economy.get("action", 0) or 0) > 0 or int(
-            economy.get("attacks_remaining", 0) or 0
-        ) > 0
+        can_act = (
+            int(economy.get("action", 0) or 0) > 0
+            or int(economy.get("attacks_remaining", 0) or 0) > 0
+            or int(economy.get("surge_action", 0) or 0) > 0
+        )
         if can_act and targets:
             target = targets[0]
             distance = self._distance(combat, actor_id, str(target["actor_id"]))
@@ -444,6 +450,7 @@ class Dnd2024CombatEngine(
         can_act = (
             int(economy.get("action", 0) or 0) > 0
             or int(economy.get("attacks_remaining", 0) or 0) > 0
+            or int(economy.get("surge_action", 0) or 0) > 0
         )
         allies = [
             target for target in self._all_targets(instance, combat)
@@ -1024,9 +1031,9 @@ class Dnd2024CombatEngine(
     def _attack_cost_event(
         self, combat: dict[str, Any], actor: dict[str, Any],
     ) -> dict[str, Any]:
-        del combat
         return {
             "type": "dnd2024.attack.spent", "actor_id": actor["actor_id"],
+            "resource": self._spend_action_resource(combat),
             "attacks_per_action": self._attacks_per_action(actor),
         }
 

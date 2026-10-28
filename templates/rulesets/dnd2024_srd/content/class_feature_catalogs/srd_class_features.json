@@ -22,6 +22,7 @@
     "paladins_smite": "Paladin’s Smite",
     "fighter": "Fighter",
     "second_wind": "Second Wind",
+    "action_surge": "Action Surge",
     "barbarian": "Barbarian",
     "rage": "Rage",
     "rage_sustain": "Sustain Rage",
@@ -151,6 +152,23 @@
               "cost": {"bonus_action": 1, "resources": [{"id": "second_wind", "amount": 1}]},
               "requires_hostile_target": false,
               "actions": [{"kind": "heal", "count": 1}]
+            }
+          ]
+        },
+        {
+          "id": "action_surge",
+          "minimum_level": 2,
+          "source_ref": "srd-5.2.1:p48:action-surge",
+          "summary": "On your turn, you can take one additional action, except the Magic action. Starting at level 17, you can use it twice before a rest, but only once on a turn.",
+          "parameters": {},
+          "resource_id": "action_surge",
+          "capabilities": [
+            {
+              "id": "action_surge",
+              "cost": {"resources": [{"id": "action_surge", "amount": 1}]},
+              "requires_hostile_target": false,
+              "once_per_turn": true,
+              "actions": [{"kind": "action_surge", "count": 1}]
             }
           ]
         }

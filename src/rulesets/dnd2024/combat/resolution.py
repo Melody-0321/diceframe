@@ -448,6 +448,21 @@ class CombatResolutionMixin:
         }]
 
     @staticmethod
+    def _spend_action_resource(combat: dict[str, Any]) -> str:
+        """Which economy pool pays for a non-magical action.
+
+        Action Surge grants a separate ``surge_action`` pool precisely so the
+        Magic action can never spend it: spell costs only read ``action`` /
+        ``bonus_action``.  The ordinary action is always consumed first, which
+        keeps payment deterministic.
+        """
+
+        economy = combat.get("economy", {}) or {}
+        if int(economy.get("action", 0) or 0) > 0:
+            return "action"
+        return "surge_action"
+
+    @staticmethod
     def _basic_action_events(
         combat: dict[str, Any], intent_type: str, actor_id: str,
         *, spend_action: bool = True,
@@ -456,7 +471,8 @@ class CombatResolutionMixin:
         if spend_action:
             events.append({
                 "type": "dnd2024.action.spent", "actor_id": actor_id,
-                "resource": "action", "amount": 1,
+                "resource": CombatResolutionMixin._spend_action_resource(combat),
+                "amount": 1,
             })
         if intent_type == "dash":
             speed = int(combat.get("economy", {}).get("speed", 0) or 0)
@@ -563,6 +579,15 @@ class CombatResolutionMixin:
                     "type": "dnd2024.condition.sustained", "target_id": actor_id,
                     "condition": "rage",
                 })
+            elif action.kind == "action_surge":
+                # Action Surge 本身不消耗动作，只写入一份独立的 surge_action。
+                # 施法成本只读 action/bonus_action，因此这份额外动作天然不能
+                # 用于魔法动作；``action_surge_used`` 在同一回合阻止第二次使用。
+                events.append({
+                    "type": "dnd2024.economy.granted", "actor_id": actor_id,
+                    "grants": {"surge_action": 1},
+                    "flags": {"action_surge_used": True},
+                })
             else:  # pragma: no cover - catalog validation guards this
                 raise CombatIntentError("unsupported class capability action")
         return events
@@ -655,7 +680,7 @@ class CombatResolutionMixin:
         success = roll + medicine >= 10
         events = [{
             "type": "dnd2024.action.spent", "actor_id": actor["actor_id"],
-            "resource": "action", "amount": 1,
+            "resource": self._spend_action_resource(combat), "amount": 1,
         }, {
             "type": "check.resolved", "kind": "medicine", "actor_id": actor["actor_id"],
             "target_id": target_id, "rolls": [roll], "natural": roll,
