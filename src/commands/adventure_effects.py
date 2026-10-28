@@ -46,6 +46,7 @@ async def settle_adventure_completion(
     *,
     config: Any | None,
     confirm: Callable[[str], Awaitable[dict]],
+    discard: Callable[[str], Awaitable[None]] | None = None,
     narration: Callable[[dict, list[str]], Awaitable[str]] | None = None,
 ) -> CompletionSettlement | None:
     """Confirm narrator-proposed node completions through the engine's authority.
@@ -58,6 +59,9 @@ async def settle_adventure_completion(
     before-images. ``narration(result, activated_nodes)`` optionally produces
     one scene-transition narration for a confirmed completion; its failure
     degrades to no narration and never rolls the completion back.
+    ``discard(node_id)`` is the matching authority-bound cleanup for a rejected
+    proposal.  It is injected by the web API so clearing the proposal and
+    persisting that cleanup use the same write boundary as confirmation.
     """
 
     if config is None or not getattr(config, "auto_confirm_completion", False):
@@ -81,7 +85,13 @@ async def settle_adventure_completion(
         except Exception as exc:
             # fail closed：确认失败 = 路线保持锁定，丢弃该提议（模型下轮可带
             # 新证据重提）；complete 事务自身已恢复 before-image。
-            clear_completion_suggestion(instance, node_id)
+            if discard is None:
+                # Direct callers without an authority adapter retain the old
+                # in-memory helper semantics; production wiring supplies the
+                # locked/persisted callback above.
+                clear_completion_suggestion(instance, node_id)
+            else:
+                await discard(node_id)
             logger.warning(
                 "叙事者节点完成提议被引擎拒绝，已丢弃: game=%s node=%s err=%s",
                 getattr(instance, "game_key", ""), node_id, exc,

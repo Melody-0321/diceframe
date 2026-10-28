@@ -285,6 +285,92 @@ async def test_turns_settle_appends_transition_to_latest_round(tmp_path):
     assert entry["state_changes"][-1] == "新的一页。"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transition", ["", None])
+async def test_turns_settle_persists_authoritative_completion_without_transition(
+    tmp_path, transition,
+):
+    from src.engine.game_instance import GameInstance
+    from src.engine.modules import adventure_runtime_state, progression_state
+    from src.webui.services import turns
+
+    instance, _ = _settled_game(tmp_path)
+    latest = int(progression_state.round_value(instance)) - 1
+    instance.log.append({
+        "round": latest, "gm_response": "刚完成的回合。", "actions": [], "state_changes": [],
+    })
+    snapshots: list[dict] = []
+
+    async def settle(inst):
+        value = adventure_runtime_state.progress(inst)
+        value["active_nodes"] = ["mid"]
+        value["completed_nodes"] = ["start"]
+        return {
+            "node_id": "start", "activated_nodes": ["mid"],
+            "transition_narration": transition,
+        }
+
+    async def save(inst):
+        snapshots.append(inst.to_dict())
+
+    dependencies = SimpleNamespace(
+        settle_adventure_completion=settle,
+        save_instance=save,
+    )
+    await turns._settle_adventure_completion(dependencies, instance, "test-key")
+
+    assert len(snapshots) == 1
+    restored = GameInstance.from_dict(snapshots[0])
+    value = adventure_runtime_state.progress(restored)
+    assert value["completed_nodes"] == ["start"]
+    assert value["active_nodes"] == ["mid"]
+
+
+@pytest.mark.asyncio
+async def test_turns_settle_records_recoverable_persistence_failure(tmp_path, caplog):
+    from src.webui.services import turns
+
+    instance, _ = _settled_game(tmp_path)
+
+    async def save(_inst):
+        raise RuntimeError("disk full")
+
+    dependencies = SimpleNamespace(
+        settle_adventure_completion=_fake_settle("start", ["mid"], ""),
+        save_instance=save,
+    )
+    with caplog.at_level("ERROR", logger="trpg"):
+        await turns._settle_adventure_completion(dependencies, instance, "test-key")
+
+    assert "节点完成权威状态已更新但持久化失败" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_rejected_proposal_uses_authority_bound_discard_callback(tmp_path):
+    instance, confirm = _settled_game(tmp_path, config=ON)
+    from src.engine.modules.adventure_runtime_state import progress
+
+    progress(instance).setdefault("completion_suggestions", []).append({
+        "format_version": 1, "node_id": "ghost",
+        "reason": "x", "evidence_rounds": [1],
+    })
+    discarded: list[str] = []
+
+    async def discard(node_id: str) -> None:
+        discarded.append(node_id)
+        from src.engine.modules.adventure_runtime_state import clear_completion_suggestion
+
+        clear_completion_suggestion(instance, node_id)
+
+    settlement = await settle_adventure_completion(
+        instance, config=ON, confirm=confirm, discard=discard,
+    )
+
+    assert settlement is None
+    assert discarded == ["ghost"]
+    assert _suggestions(instance) == []
+
+
 def _fake_settle(node_id, activated, transition):
     async def settle(instance):
         return {
