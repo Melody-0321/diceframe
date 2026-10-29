@@ -150,7 +150,7 @@ MapBackground（已有）      +   token 渲染层（前端新增）
 | 一 | 切片 2：Rage（effect 实例 + 加成 + 优势来源） | ✅ 完成（任务书 v2，分支 `feat/rage`；`requires/forbidden_condition` schema、`established` 保证轮生命周期、str 豁免优势、track 加值均已测试锁定） |
 | 一 | 切片 3：Uncanny Dodge（触发泛化 + 伤害修正窗口） | ✅ 完成（任务书 v2，分支 `feat/uncanny-dodge`；`hit_reaction` 决策泛化到特性选项、伤害减半、AI 自动选择、人类玩家按钮均已测试/构建锁定） |
 | 一 | 切片 4：Action Surge（economy 授予） | ✅ 完成（任务书 v2，分支 `feat/action-surge`；`economy.granted` 通用授予事件、surge_action 独立经济 key、once_per_turn 通用字段、支付优先级、施法结构性排除均已测试锁定） |
-| 一 | 切片 5：Sneak Attack（谓词伤害） | ⬜ 未开始 |
+| 一 | 切片 5：Sneak Attack（谓词伤害） | ✅ 完成（任务书 v1，分支 `feat/sneak-attack`；武器/优势/盟友谓词、extra_dice_formulas 多附加骰 AST、feature_usage 每回合账本、决策链延迟消耗均已测试锁定） |
 | 1B | 法术原语切片 P1–P9（矩阵见 `design/SPELL_GAP_MATRIX.md`） | ⬜ 未开始（建议顺序 P1→P5→P2→P3→P4→P6→P8→P7→P9，P1–P5 为法术/特性共用底座优先） |
 | 二 | 法术批量填充管线（原型已验证，review 13 + manual 33 待处理） | 🔄 原型完成（`scripts/rulesets/import_dnd5eapi_spell_effects.py`） |
 | 二 | spells / progression / class_feature source-aware 解耦 | ⬜ 未开始 |
@@ -199,6 +199,15 @@ MapBackground（已有）      +   token 渲染层（前端新增）
 - 架构质量：`economy.granted` 是通用授予事件（grants/flags 双载荷 + `_GRANTABLE_ECONOMY` 白名单校验 + 未知 key/负值/bool fail-closed），非 action_surge 专用分支；`once_per_turn` 是 FeatureCapability 通用字段，切片 5 Sneak Attack 可直接复用。
 - 切片 3 教训闭环：任务书 v1 正面回答了"哪个人类玩家的哪次点击"——surge 走既有 capability 按钮，surge 后 attack 等按钮因门控放宽重新出现在投影中，前端零改动成立。
 - 教训（对后续任务书的要求）：**支付/经济类规格必须先枚举同一支付域的全部消费路径**（attack、basic actions、stabilize、施法各走独立事件构建），逐路径声明改不改、怎么改；本切片靠执行端补全 stabilize 路径，属于任务书规格漏项。
+
+### 切片 5 审核记录（2026-10-29）
+
+- 验收复跑通过：`test_dnd2024_sneak_attack.py` 21 passed，三目标文件合计 83 passed；全仓库 `-k sneak_attack` 26 passed；rulesets 全量 507 passed + 11 failed 均为已知上游豁免（`test_dnd2024_character_builder.py`），planner 独立复跑核实一致。
+- 白名单合规：11 个白名单文件 + 报告豁免；progression/rest catalog、resolver、validation、view、engine、`frontend-v2/` 零触碰（另有前端 3 文件与 `docs/internal/README.md` 的 M 标记经 `git diff` 核实为零内容差异行尾噪音，主计划 M 为 planner 侧规划改动，非执行端越权）。
+- 任务书 §1.1 六条规则边界全部测试锁定：盟友按攻击者阵营并按到目标的距离判定（攻击者本人不算）；优劣势相消（`""` 模式）仍可走盟友路线；投掷非灵巧近战武器不触发（不看 `ranged_use`）；偷袭骰并入武器伤害单事件（被 Uncanny Dodge 一并减半）；Shield 改判 miss 不消耗每回合一次；"每回合"≠"每轮"（敌人回合借机攻击可再用，账本记 round+turn_index 归属攻击者）。
+- 执行端三处偏离（均已接受）：①借机攻击决策的威胁方攻击档案——enemy 仍走原 `attack_id` 路径（字节不变），player/companion 走 `_available_attacks` 的 `weapon_ref`（case 13 真实 move→decision.resolve 链的必要条件）；②Shield/Uncanny Dodge 同阵营受击用任务书 §3.8 授权的构造例外（生产 offer 不面向同阵营）；③companion 代替第二玩家系任务书明文允许。
+- 架构质量：`feature_usage` 是按攻击者 + round/turn_index 的战斗级通用账本，不读当前行动者经济；`dnd2024.feature.used` 对同 actor 同回合同 feature 重复提交 fail-closed，`setdefault` 兼容旧存档免迁移；`attack_damage_node` 的 `extra_dice_formulas` 有序列表让 Hex/偷袭共用一条伤害 AST，重击翻倍全部骰节点而属性修正保持常量；延迟 `feature_use` 元数据只在最终落地伤害路径提交（`_submit_hit_damage` 统一收口全部提交点）。
+- 切片 3 教训闭环：任务书 §1.2 的自动附加策略结构性回答了"哪个人类玩家的哪次点击"——满足谓词的第一次合法命中自动附加偷袭，复用既有 Attack 按钮与借机攻击决策卡，前端零改动成立；账本键在任务书中前置约束，经济域零偏离。
 
 ## 待定决策
 
