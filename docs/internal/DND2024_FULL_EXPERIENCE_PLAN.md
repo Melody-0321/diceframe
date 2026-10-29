@@ -151,8 +151,9 @@ MapBackground（已有）      +   token 渲染层（前端新增）
 | 一 | 切片 3：Uncanny Dodge（触发泛化 + 伤害修正窗口） | ✅ 完成（任务书 v2，分支 `feat/uncanny-dodge`；`hit_reaction` 决策泛化到特性选项、伤害减半、AI 自动选择、人类玩家按钮均已测试/构建锁定） |
 | 一 | 切片 4：Action Surge（economy 授予） | ✅ 完成（任务书 v2，分支 `feat/action-surge`；`economy.granted` 通用授予事件、surge_action 独立经济 key、once_per_turn 通用字段、支付优先级、施法结构性排除均已测试锁定） |
 | 一 | 切片 5：Sneak Attack（谓词伤害） | ✅ 完成（任务书 v1，分支 `feat/sneak-attack`；武器/优势/盟友谓词、extra_dice_formulas 多附加骰 AST、feature_usage 每回合账本、决策链延迟消耗均已测试锁定） |
-| 1B | 法术原语切片 P1–P9（矩阵见 `design/SPELL_GAP_MATRIX.md`） | 🔶 进行中（P1 已完成；建议顺序 P1→P5→P2→P3→P4→P6→P8→P7→P9，P1–P5 为法术/特性共用底座优先） |
+| 1B | 法术原语切片 P1–P9（矩阵见 `design/SPELL_GAP_MATRIX.md`） | 🔶 进行中（P1、P5 已完成；建议顺序 P1→P5→P2→P3→P4→P6→P8→P7→P9，P1–P5 为法术/特性共用底座优先） |
 | 1B | P1：invisibility（attack_sources 数据驱动 + 升环目标数 + 专注法术提前终止） | ✅ 2026-10-29 执行完成并审核通过（任务书 v1 + 执行报告；`feat/p1-invisibility` WIP 原型融合入本分支，借机攻击事件序交叉已修并补测） |
+| 1B | P5：stoneskin（伤害类型抗性框架 + 偿还 Rage 抗性债） | ✅ 2026-10-29 执行完成并审核通过（任务书 v1 + 执行报告；抗性来源 = 注册表静态声明 ∪ condition 元数据动态声明，`_resist_damage` 集合判成员保证不叠加；Rage 硬编码减半特判移除、改注册表驱动，行为等价由既有测试锁定；免疫/易伤按 §1.2 裁剪，挂钩点已预留） |
 | 二 | 法术批量填充管线（原型已验证，review 13 + manual 33 待处理） | 🔄 原型完成（`scripts/rulesets/import_dnd5eapi_spell_effects.py`） |
 | 二 | spells / progression / class_feature source-aware 解耦 | ⬜ 未开始 |
 | 二 | 许可分层声明（AGPL 代码 / CC-BY 内容） | ⬜ 未开始 |
@@ -222,6 +223,19 @@ MapBackground（已有）      +   token 渲染层（前端新增）
 - 切片 3 教训闭环：施法走既有 cast 界面（`target_ids` 多目标校验已有）、优劣势自动进 check 投影，前端零改动成立。
 - 教训（对后续切片的要求）：**凡改动事件列表结构（插入/重排），必须 grep 所有按位置消费该列表的代码**——本次交叉正是"位置耦合"被两批独立改动同时命中，单侧分支的测试无法暴露；后续切片在整合分支上融合后必须重跑受影响套件而非沿用 WIP 分支的测试结论。
 - 遗留提醒（不阻塞本切片）：①整合分支主计划 1B 行引用的 `SPELL_GAP_MATRIX.md` 与 `scripts/rulesets/import_dnd5eapi_spell_effects.py` 来自原始线 `d134f4be`，尚未搬运到本分支，引用悬空；②`53b715e1` 的 Uncanny Dodge"必须看见攻击者"检查未考虑防御者持 `see_invisibility` 的抵消（RAW 下持识破隐形者可对隐形攻击者反应），归后续感官切片统一处理。
+
+### P5 审核记录（2026-10-29）
+
+- 验收复跑通过（整合分支工作树）：`test_dnd2024_stoneskin.py` 13 passed；回归六文件（rage/combat/spells/uncanny_dodge/smite/invisibility）100 passed，与执行报告一致；rulesets 全量复跑见提交记录。
+- 白名单合规：6 文件全部命中 §3 白名单（`catalog.py` / `validation.py` / `resolution.py` / `srd_combat_core.json` / 新增 `test_dnd2024_stoneskin.py`）+ 任务书执行报告豁免；无白名单外变更。
+- 任务书 §1.1 九条规则边界全部测试锁定：减半一次（#6 rage+stoneskin 仍 7→3）；向下取整（#2 奇数 7→3）；骰迹不动（#2 `rolls == [5]`）；专注 DC 用扣抗后伤害（#4 44→22、DC 11，原始值会得 DC 22 的反证成立）；击败判定同变量链路；豁免减半与抗性独立相乘（#10 11→5→2，inflict_wounds 目录条目确为 saving_throw+half_on_success 已核实）；治疗不经抗性（#12）；修正→抗性顺序（#11 pending 事件已持 3、Uncanny Dodge 决策结算再半得 1，两步减半可交换）；三类 actor（#2 player、#9/#10 enemy 元数据抗性）。
+- **Rage 抗性债偿还方式（核心裁定：接受，偏离任务书 §1"不改 Rage 引擎代码"）**：`53b715e1` 在武器攻击路径留下的 `"rage"` 硬编码减半特判被移除，改由注册表条目驱动——属"删特判"而非新增 Rage 路径，正是本计划 Rage 行预告的"数据驱动归入 P5 偿还"。行为等价核实：旧 `int(damage * 0.5)` 与新 `damage // 2` 对非负整数一致（旧 `halved != damage` 仅在 0 时不打标记，新 `amount <= 0` 短路同理）；`resistance == "rage"` 既有事件契约保留（`_resist_damage` 返回来源 id，偏离 §3.4.A 的 bool 签名但守住已发布契约）；`test_dnd2024_rage.py` 原样全过。
+- 交叉排查（P1 教训执行）：①`condition.removed` 插入 buff 事件序——reducer 消费方按事件类型处理、schema（target_id/condition）与既有发射点一致，runtime 事件白名单已含该类型，无位置耦合消费方，#8 显式锁定 removed 先于 applied；②`_resist_damage` 与旧 rage 特判均不消耗 RNG，SequenceRng 序列零漂移；③`resisted`/`resistance` 新增事件键——`frontend-v2/src` 全量 grep `resist` 零命中，§7.3 停止条件未触发。
+- 执行端七项偏离全部裁定接受（详见任务书执行报告 §C）：#1 签名 (int, str)；#2 即上述 Rage 特判移除；#3–#5 为测试写法（fire bolt 对石肤目标机制不可达、magic missile/inflict_wounds 无匹配抗性来源，向敌人注入元数据抗性覆盖 automatic_damage/saving_throw 路径——元数据仅测试可写，生产端只能由 `resist_choice` 施法写入）；#6 治疗期望 12（7 级智力 +3）；#7 fire_shield `range: 5` 为任务书原样。
+- **审核发现：第五伤害构造点（§7.2 场景，executor 未报告，planner 裁定推迟）**：`triggered_spells.py` L206（Divine Smite 的 triggered_damage）自建 hp 事件、未接 `_resist_damage`。今日休眠——smite 为 radiant，现有全部抗性来源（物理/毒素/五元素选择/火焰护盾）无 radiant，行为零偏差；接入归触发/反应注册表扩展切片（fire_shield 反伤 rider 同批），届时补"抗性 vs 触发伤害"测试。归因：任务书 §2 契约表漏列该点，属 planner 侧规格不完备，非执行侧违规。
+- planner 侧遗留裁定：fire_shield RAW 为"自身"，但 catalog 校验强制 `5 <= range <= 600`，"自身"编码（放宽下限或引入 self 语义）是首个自身 buff 落地后的待定设计点（P4 false_life 会再遇到），归后续数据批次统一决策，本切片按任务书原样保留并记录。
+- 架构质量：抗性来源两处服务端权威（注册表静态声明 ∪ condition 元数据动态写入），集合判成员保证不叠加；`resist_type` 双向 fail closed（声明必选、未声明必拒，#7 双向锁定）；`energy_resistant`/`fire_shield_resistant` 为纯元数据条件（注册表不强制每个 condition id 有条目，`see_invisibility` 同款先例）；`removes_conditions` 只由服务端目录声明触发。
+- 遗留（执行报告 §D 已登记，均不阻塞）：免疫/易伤挂钩点在 `_resist_damage` 结构上预留；fire_shield 2d8 反伤 rider 待触发注册表扩展；protection_from_poison 中毒豁免优势待豁免优势来源原语；多源同类型时 `resistance` 来源名依赖 conditions 迭代序（`resisted`/`amount` 不受影响）。
 
 ## 待定决策
 

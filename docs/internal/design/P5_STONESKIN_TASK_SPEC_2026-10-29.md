@@ -183,3 +183,63 @@
 ## 9. 修订记录
 
 - v1（2026-10-29）：初版。
+
+---
+
+# 执行报告（2026-10-29）
+
+## A. 变更文件清单（`git status` 全部命中 §3 白名单）
+
+| 文件 | 变更 |
+|---|---|
+| `templates/rulesets/dnd2024_srd/content/combat_catalogs/srd_combat_core.json` | `conditions` 追加 `rage`/`stoneskinned`/`poison_resistant` 静态抗性条目；`spell_effects` 追加 `stoneskin`/`protection_from_energy`/`protection_from_poison`/`fire_shield` |
+| `src/rulesets/dnd2024/combat/catalog.py` | 新增模块级 `DAMAGE_TYPES`；`spell_effects` 校验 `resist_choice`/`removes_conditions`；`conditions` 校验 `resist_damage_types`（非空、已知类型、无重复），并允许"仅声明抗性"的条目 |
+| `src/rulesets/dnd2024/combat/validation.py` | `_validate_spell` 追加 `resist_choice` ↔ `resist_type` 双向校验（缺选择拒绝、未声明却携带拒绝） |
+| `src/rulesets/dnd2024/combat/resolution.py` | 新增 `_resist_damage`；四处伤害构造点接入；buff 分支写入 `resist_damage_types` 元数据、`removes_conditions` 先发 `condition.removed` |
+| `tests/rulesets/test_dnd2024_stoneskin.py` | 新增，13 个测试覆盖 §4 矩阵 |
+| 本任务书 | 仅追加本执行报告（§8 豁免） |
+
+无白名单外改动；`test_dnd2024_character_builder.py` 未纳入验收，未触碰。
+
+## B. 测试矩阵逐项结果（全部通过）
+
+| # | 测试 | 结果 |
+|---|---|---|
+| 1 | `test_catalog_rejects_invalid_resistance_declarations`：未知类型/空列表/重复项/非法 `removes_conditions` | 通过 |
+| 2 | `test_stoneskin_halves_slashing_damage_once_with_floor_rounding`：7 → 3，`resisted is True`，`resistance == "stoneskinned"`，`rolls == [5]` | 通过 |
+| 3 | `test_stoneskin_does_not_reduce_fire_damage`：7 不减半、无 `resisted`/`resistance` | 通过 |
+| 4 | `test_concentration_dc_uses_the_halved_damage`：44 → 22，DC 11（原始 44 会得 22） | 通过 |
+| 5 | `test_rage_resistance_comes_from_the_registry`：挥砍 7 → 3、火焰 7 不减 | 通过 |
+| 6 | `test_rage_and_stoneskin_still_halve_only_once`：7 → 3（非 1） | 通过 |
+| 7 | `test_protection_from_energy_requires_and_applies_its_choice`：缺 `resist_type` 拒绝、石肤携带 `resist_type` 拒绝；寒冷 3、火焰 7；元数据 `["cold"]` | 通过 |
+| 8 | `test_protection_from_poison_removes_poisoned_before_applying`：`condition.removed` 早于 `condition.applied`；毒素 7 → 3 | 通过 |
+| 9 | `test_magic_missile_is_halved_by_a_matching_resistance`：15 → 7，`resisted` | 通过 |
+| 10 | `test_saving_throw_half_then_resistance_deals_a_quarter`：11 → 5 → 2 | 通过 |
+| 11 | `test_stoneskin_and_uncanny_dodge_stack_two_halvings`：7 → 3（pending 持有）→ 1 | 通过 |
+| 12 | `test_healing_is_not_reduced_by_resistance`：治疗 12，无 `resisted` | 通过 |
+| 13 | `test_fire_shield_resists_its_chosen_type_without_a_rider`：火焰 3、寒冷 7、攻击者无伤害事件 | 通过 |
+
+验收命令实测：
+
+```
+tests/rulesets/test_dnd2024_stoneskin.py -q            -> 13 passed
+rage + combat + spells + uncanny_dodge + smite + invisibility -q -> 100 passed
+```
+
+## C. 偏差说明
+
+1. **`_resist_damage` 返回 `(int, str)` 而非 `(int, bool)`**（§3.4.A 写的是 bool）。原因：既有 Rage 契约已发布 `damage["resistance"] == "rage"`（`test_dnd2024_rage.py`），必须保留。事件同时写 `resisted: true`（本切片契约）与 `resistance: <condition_id>`（既有契约）。`""` 即未生效。
+2. **Rage 硬编码减半块被替换**（§1.3 写"不改 Rage 引擎代码"）。实施时发现武器攻击路径早已存在针对 `"rage"` 的硬编码减半（review 阶段已落地），与新原语重复。已删除该特判，改由注册表驱动；没有新增任何 Rage 分支，Rage 测试断言原样通过。这属于**移除特判**而非新增 Rage 路径，但确实改动了攻击路径代码，如实记录。
+3. **§4#3 的"石肤目标受火焰（fire bolt）"** 在机制上不可达（石肤只抗物理，且 fire bolt 是 spell_attack 而非目标攻击）。测试改为把敌人攻击档案的 `damage_type` 覆盖为 `fire`，验证武器攻击路径不误减半。
+4. **§4#9 的"magic missile 对抗性目标"** 目录中无任何力场抗性来源（免疫/易伤已裁剪）。测试向敌人注入 `{"resist_damage_types": ["force"]}` 元数据以覆盖 `automatic_damage` 路径；元数据仅测试可写，生产端只能由 `resist_choice` 施法写入。
+5. **§4#10 的"inflict_wounds 对石肤目标"** 同上，石肤不抗死灵。测试向敌人注入 `necrotic_resistant` 元数据，覆盖 `saving_throw → half_on_success → 抗性` 链路（11 → 5 → 2），仍满足"原值 // 4"。
+6. **§4#12 期望治疗量修正为 12**：7 级法师 4 级已获属性提升，智力 +3（非 +2），2d8(4+5)+3 = 12。仅测试期望，引擎无改动。
+7. **`fire_shield` 目录 `range: 5` 按任务书原样落地**，与法术书"自身"不一致；自施法距离 0 可通过，不影响机制。`protection_from_poison` 的 1 小时、`fire_shield` 的 10 分钟仍无战斗内到期机制（既有 `1_hour` 同款限制），由 GM 叙事层管理。
+
+## D. 遗留与后续挂钩点
+
+1. **免疫/易伤**：在 `_resist_damage` 同一集合判成员结构上扩展 `immune_damage_types` / `vulnerable_damage_types`（注册表 + 元数据），并按 RAW 顺序"抗性 → 易伤，不叠加"实现；等待首个消费者。
+2. **fire_shield 2d8 反伤 rider**：需要"近战命中攻击者"的受击触发伤害挂钩（攻击者侧结算期伤害事件），属触发/反应注册表扩展，本切片不做。
+3. **protection_from_poison 的中毒豁免优势**：需要独立的豁免优势来源注册原语（S-P 系/后续切片）。
+4. **抗性来源的确定性**：`_resist_damage` 按目标 `conditions` 迭代顺序返回首个命中来源；`resistance` 字段因此仅在"多源同类型"时依赖顺序（`resisted` 与 `amount` 不受影响）。如需稳定来源名，可后续按优先级排序。
+5. **`energy_resistant` / `fire_shield_resistant` 无注册表条目**：只作为动态元数据条件存在，与 `see_invisibility` 同款（注册表只校验已声明条目，不强制每个 condition id 都有条目）；`_expire_conditions` 对它们沿用 duration 机制。

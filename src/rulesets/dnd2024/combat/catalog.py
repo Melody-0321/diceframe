@@ -17,6 +17,10 @@ SPELL_MODES = frozenset({
     "spell_attack", "saving_throw", "healing", "automatic_damage", "buff", "debuff", "triggered_damage",
     "stabilize", "reaction_defense",
 })
+DAMAGE_TYPES = frozenset({
+    "bludgeoning", "slashing", "piercing", "acid", "cold", "fire", "lightning",
+    "thunder", "poison", "psychic", "force", "necrotic", "radiant",
+})
 
 
 class CombatCatalogError(ValueError):
@@ -89,6 +93,26 @@ class Dnd2024CombatCatalog:
                 or not 0 < upcast_targets <= 10
             ):
                 raise CombatCatalogError(f"combat spell upcast target count is invalid: {spell_id}")
+            resist_choice = effect.get("resist_choice")
+            if resist_choice is not None and (
+                not isinstance(resist_choice, list)
+                or not resist_choice
+                or any(not isinstance(kind, str) or kind not in DAMAGE_TYPES for kind in resist_choice)
+                or len(set(resist_choice)) != len(resist_choice)
+            ):
+                raise CombatCatalogError(f"combat spell resist choice is invalid: {spell_id}")
+            removes_conditions = effect.get("removes_conditions")
+            if removes_conditions is not None and (
+                not isinstance(removes_conditions, list)
+                or not removes_conditions
+                or any(
+                    not isinstance(code, str) or not re.fullmatch(r"[a-z0-9_]{1,64}", code)
+                    for code in removes_conditions
+                )
+            ):
+                raise CombatCatalogError(
+                    f"combat spell removed conditions are invalid: {spell_id}"
+                )
             ends_on = effect.get("ends_on")
             if ends_on is not None and (
                 not isinstance(ends_on, list)
@@ -129,11 +153,30 @@ class Dnd2024CombatCatalog:
                 raise CombatCatalogError(
                     f"combat condition must be an object: {condition_id}"
                 )
-            if set(entry) - {"attack_modes"}:
+            if set(entry) - {"attack_modes", "resist_damage_types"}:
                 raise CombatCatalogError(
                     f"combat condition has unknown fields: {condition_id}"
                 )
+            resist_types = entry.get("resist_damage_types")
+            if resist_types is not None and (
+                not isinstance(resist_types, list)
+                or not resist_types
+                or any(
+                    not isinstance(kind, str) or kind not in DAMAGE_TYPES
+                    for kind in resist_types
+                )
+                or len(set(resist_types)) != len(resist_types)
+            ):
+                raise CombatCatalogError(
+                    f"combat condition resist types are invalid: {condition_id}"
+                )
             modes = entry.get("attack_modes")
+            # A condition may declare resistance only; if it declares neither
+            # mechanics nor attack modes the entry is still rejected, matching
+            # the P1 rule that every registry entry must state something.
+            if modes is None and resist_types is not None:
+                result[str(condition_id)] = deepcopy(entry)
+                continue
             if not isinstance(modes, list):
                 raise CombatCatalogError(
                     f"combat condition attack_modes must be an array: {condition_id}"

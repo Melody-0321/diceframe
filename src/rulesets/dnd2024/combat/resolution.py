@@ -24,6 +24,7 @@ from .primitives import (
     player_actor as _player_actor,
 )
 from .reaction_spells import HIT_REACTION_DECISION, effective_armor_class
+from .check_modes import condition_flags
 from .triggered_spells import HIT_SPELL_DECISION
 
 
@@ -138,6 +139,34 @@ class CombatResolutionMixin:
             })
         return events
 
+    def _resist_damage(
+        self, target: dict[str, Any], amount: int, damage_type: str,
+    ) -> tuple[int, str]:
+        """Halve ``amount`` once when the target resists ``damage_type``.
+
+        Resistance sources are server-authoritative in two places: the combat
+        catalog's condition registry (static declarations such as rage and
+        stoneskin) and each condition's metadata (written by choice-driven
+        spells). A single set-membership test guarantees that multiple
+        simultaneous sources never stack; the returned condition id names the
+        source for the event, or ``""`` when nothing applies.
+        """
+
+        if amount <= 0 or not damage_type:
+            return amount, ""
+        for condition_id, meta in (target.get("conditions") or {}).items():
+            types = set((self.catalog.conditions.get(condition_id) or {}).get(
+                "resist_damage_types"
+            ) or [])
+            if isinstance(meta, dict):
+                types.update(
+                    str(kind) for kind in meta.get("resist_damage_types") or []
+                    if isinstance(kind, str) and kind
+                )
+            if damage_type in types:
+                return amount // 2, condition_id
+        return amount, ""
+
     def _attack_events(
         self, instance: Any, combat: dict[str, Any], intent: dict[str, Any], rng: Any,
         *, spend_attack_action: bool = True,
@@ -212,6 +241,15 @@ class CombatResolutionMixin:
         target_ac = effective_armor_class(target)
         critical = natural == 20
         hit = natural != 1 and (critical or total >= target_ac)
+        if (
+            hit and not critical and distance <= 5
+            and condition_flags(
+                self.catalog.conditions, target["conditions"],
+            )["crit_on_hit_within_5"]
+        ):
+            # 2024 麻痹/昏迷：5 尺内的命中直接升级为重击。失手（natural 1
+            # 或未达 AC）不升级，所以判定必须发生在 hit 之后。
+            critical = True
         events: list[dict[str, Any]] = [
             # 提前终止先于消耗支付落账：预约的是"发起攻击检定"这一事实，
             # 命中与否、动作是否还能支付都不影响它（借机攻击同样触发）。
@@ -266,23 +304,14 @@ class CombatResolutionMixin:
                     ]}
             damage, rolls = roll_damage_node(damage_node, rng)
             damage = max(0, damage)
-            resistance = None
-            if (
-                "rage" in target["conditions"]
-                and str(damage_type) in ("bludgeoning", "piercing", "slashing")
-            ):
-                # 2024 狂暴：承受的钝击/穿刺/挥砍伤害减半，
-                # 取整方式与反应减半（damage_multiplier）一致：向下取整。
-                halved = int(damage * 0.5)
-                if halved != damage:
-                    resistance = "rage"
-                    damage = halved
+            damage, resistance = self._resist_damage(target, damage, damage_type)
             damage_event = {
                 "type": "resource.changed", "resource": "hp", "target_id": target_id,
                 "delta": -damage, "amount": damage, "damage_type": damage_type,
                 "critical": critical, "rolls": rolls,
             }
             if resistance:
+                damage_event["resisted"] = True
                 damage_event["resistance"] = resistance
             if sneak_dice:
                 # 延迟提交：只有这次命中伤害最终落地才记一次偷袭使用。
@@ -365,55 +394,89 @@ class CombatResolutionMixin:
                 total = roll + bonus
                 target_ac = effective_armor_class(target)
                 succeeded = roll != 1 and (roll == 20 or total >= target_ac)
+                critical = roll == 20
+                if (
+                    succeeded and not critical
+                    and self._distance(combat, actor_id, target_id) <= 5
+                    and condition_flags(
+                        self.catalog.conditions, target["conditions"],
+                    )["crit_on_hit_within_5"]
+                ):
+                    # 法术攻击同属攻击检定：5 尺内命中麻痹/昏迷目标同样升级为重击。
+                    critical = True
                 events.append({
                     "type": "check.resolved", "kind": "spell_attack", "actor_id": actor_id,
                     "target_id": target_id, "rolls": rolls, "natural": roll,
                     "advantage_mode": check_mode["mode"], "advantage_sources": check_mode["sources"],
                     "modifier": bonus, "total": total, "target": target_ac,
-                    "success": succeeded, "critical": roll == 20,
+                    "success": succeeded, "critical": critical,
                 })
                 if succeeded:
                     damage_node = spell_formula_node(
                         str(effect["damage"]), effect.get("upcast_damage"),
                         spell, slot_level, actor,
                     )
-                    if roll == 20:
+                    if critical:
                         damage_node = double_dice_counts(damage_node)
                     damage, rolls = roll_damage_node(damage_node, rng)
-                    events.append({
+                    damage_type = str(
+                        intent.get("damage_type") or effect.get("damage_type") or ""
+                    )
+                    damage, resistance = self._resist_damage(target, damage, damage_type)
+                    damage_event = {
                         "type": "resource.changed", "resource": "hp", "target_id": target_id,
                         "delta": -damage, "amount": damage,
-                        "damage_type": str(intent.get("damage_type") or effect.get("damage_type")),
-                        "critical": roll == 20, "rolls": rolls,
-                    })
+                        "damage_type": damage_type,
+                        "critical": critical, "rolls": rolls,
+                    }
+                    if resistance:
+                        damage_event["resisted"] = True
+                        damage_event["resistance"] = resistance
+                    events.append(damage_event)
                     events.extend(self._concentration_events(target, damage, rng))
                     if self._last_hostile_defeated(combat, target, damage):
                         defeated_targets.add(target_id)
                 events.extend(self._consume_attack_conditions(actor_id, target_id, actor, target))
             elif mode == "saving_throw":
                 save_ability = str(effect["save"])
-                # 2024 狂暴：力量豁免具有优势（双骰取高），其它属性仍为单骰。
-                rage_advantage = "rage" in target["conditions"] and save_ability == "str"
-                first = int(rng.randint(1, 20))
-                second = int(rng.randint(1, 20)) if rage_advantage else None
-                roll = max(first, second) if second is not None else first
-                bless = int(rng.randint(1, 4)) if "blessed" in target["conditions"] else 0
                 modifier = int(target["saving_throws"].get(save_ability, 0) or 0)
-                total = roll + modifier + bless
-                succeeded = total >= int(actor["spell_save_dc"])
-                check_event = {
-                    "type": "check.resolved", "kind": "saving_throw", "actor_id": target_id,
-                    "source_actor_id": actor_id, "ability": save_ability,
-                    "rolls": [value for value in (first, second) if value is not None],
-                    "natural": roll, "modifier": modifier, "bless_bonus": bless, "total": total,
-                    "target": actor["spell_save_dc"], "success": succeeded,
-                }
-                if rage_advantage:
-                    check_event["advantage_mode"] = "advantage"
-                    check_event["advantage_sources"] = [
-                        {"code": "rage", "mode": "advantage"},
-                    ]
-                events.append(check_event)
+                auto_failed = save_ability in condition_flags(
+                    self.catalog.conditions, target["conditions"],
+                )["auto_fail_saves"]
+                if auto_failed:
+                    # 麻痹/震慑/昏迷：力敏豁免自动失败，不掷任何骰（含 bless）。
+                    succeeded = False
+                    check_event = {
+                        "type": "check.resolved", "kind": "saving_throw",
+                        "actor_id": target_id, "source_actor_id": actor_id,
+                        "ability": save_ability, "rolls": [], "natural": 0,
+                        "modifier": modifier, "bless_bonus": 0, "total": 0,
+                        "target": actor["spell_save_dc"], "success": False,
+                        "auto_failed": True,
+                    }
+                    events.append(check_event)
+                else:
+                    # 2024 狂暴：力量豁免具有优势（双骰取高），其它属性仍为单骰。
+                    rage_advantage = "rage" in target["conditions"] and save_ability == "str"
+                    first = int(rng.randint(1, 20))
+                    second = int(rng.randint(1, 20)) if rage_advantage else None
+                    roll = max(first, second) if second is not None else first
+                    bless = int(rng.randint(1, 4)) if "blessed" in target["conditions"] else 0
+                    total = roll + modifier + bless
+                    succeeded = total >= int(actor["spell_save_dc"])
+                    check_event = {
+                        "type": "check.resolved", "kind": "saving_throw", "actor_id": target_id,
+                        "source_actor_id": actor_id, "ability": save_ability,
+                        "rolls": [value for value in (first, second) if value is not None],
+                        "natural": roll, "modifier": modifier, "bless_bonus": bless,
+                        "total": total, "target": actor["spell_save_dc"], "success": succeeded,
+                    }
+                    if rage_advantage:
+                        check_event["advantage_mode"] = "advantage"
+                        check_event["advantage_sources"] = [
+                            {"code": "rage", "mode": "advantage"},
+                        ]
+                    events.append(check_event)
                 if effect.get("damage"):
                     damage_node = spell_formula_node(
                         str(effect["damage"]), effect.get("upcast_damage"),
@@ -422,13 +485,20 @@ class CombatResolutionMixin:
                     damage, rolls = roll_damage_node(damage_node, rng)
                     if succeeded:
                         damage = damage // 2 if effect.get("half_on_success") else 0
+                    damage_type = str(effect.get("damage_type") or "force")
+                    # 抗性在豁免减半之后结算（RAW 顺序：先修正，后抗性）。
+                    damage, resistance = self._resist_damage(target, damage, damage_type)
                     if damage:
-                        events.append({
+                        damage_event = {
                             "type": "resource.changed", "resource": "hp",
                             "target_id": target_id, "delta": -damage, "amount": damage,
-                            "damage_type": str(effect.get("damage_type") or "force"),
+                            "damage_type": damage_type,
                             "critical": False, "rolls": rolls,
-                        })
+                        }
+                        if resistance:
+                            damage_event["resisted"] = True
+                            damage_event["resistance"] = resistance
+                        events.append(damage_event)
                         events.extend(self._concentration_events(target, damage, rng))
                         if self._last_hostile_defeated(combat, target, damage):
                             defeated_targets.add(target_id)
@@ -438,12 +508,18 @@ class CombatResolutionMixin:
                     spell, slot_level, actor,
                 )
                 damage, rolls = roll_damage_node(damage_node, rng)
-                events.append({
+                damage_type = str(effect.get("damage_type") or "force")
+                damage, resistance = self._resist_damage(target, damage, damage_type)
+                damage_event = {
                     "type": "resource.changed", "resource": "hp", "target_id": target_id,
                     "delta": -damage, "amount": damage,
-                    "damage_type": str(effect.get("damage_type") or "force"),
+                    "damage_type": damage_type,
                     "critical": False, "rolls": rolls,
-                })
+                }
+                if resistance:
+                    damage_event["resisted"] = True
+                    damage_event["resistance"] = resistance
+                events.append(damage_event)
                 events.extend(self._concentration_events(target, damage, rng))
                 if self._last_hostile_defeated(combat, target, damage):
                     defeated_targets.add(target_id)
@@ -491,7 +567,38 @@ class CombatResolutionMixin:
                 # 服务端从目录效果拷贝提前终止声明；客户端永远无法声明它。
                 if effect.get("ends_on") is not None:
                     applied["ends_on"] = deepcopy(effect["ends_on"])
+                # 选择型抗性：施法时选定的伤害类型写进 condition 元数据，
+                # 之后由结算期的抗性辅助读取（客户端不能直接写元数据）。
+                if effect.get("resist_choice"):
+                    applied["resist_damage_types"] = [str(intent["resist_type"])]
+                # 每回合重复豁免：DC 是施放当刻快照，之后施法者变化不影响。
+                if effect.get("save_repeat") is not None:
+                    applied["save_repeat"] = {
+                        "ability": str(effect["save_repeat"]),
+                        "dc": int(actor["spell_save_dc"]),
+                    }
+                for removed in effect.get("removes_conditions") or []:
+                    if str(removed) in target["conditions"]:
+                        events.append({
+                            "type": "condition.removed", "target_id": target_id,
+                            "condition": str(removed),
+                        })
                 events.append(applied)
+                # 失能打断专注：新施加的 condition 自身专注者仍是施法者，
+                # 只结束目标自己持有的专注（预结算视图判定）。
+                if (
+                    self.catalog.conditions.get(condition, {})
+                    .get("implies_incapacitated")
+                    and any(
+                        isinstance(meta, dict)
+                        and meta.get("concentration_owner") == target_id
+                        for meta in target["conditions"].values()
+                    )
+                ):
+                    events.append({
+                        "type": "dnd2024.concentration.ended", "actor_id": target_id,
+                        "reason": "incapacitated",
+                    })
             if succeeded and int(effect.get("push", 0) or 0):
                 direction = 1 if self._position(combat, target_id) >= self._position(combat, actor_id) else -1
                 events.append({
@@ -796,7 +903,68 @@ class CombatResolutionMixin:
                 raise CombatIntentError("unsupported class capability action")
         return events
 
-    def _end_turn_events(self, instance: Any, combat: dict[str, Any]) -> list[dict[str, Any]]:
+    def _save_repeat_events(
+        self, instance: Any, combat: dict[str, Any], actor_id: str, rng: Any,
+    ) -> list[dict[str, Any]]:
+        """目标回合结束时的重复豁免 tick（condition 元数据携带 save_repeat 快照）。"""
+
+        actor = self._actor_view(instance, combat, actor_id)
+        flags = condition_flags(self.catalog.conditions, actor["conditions"])
+        events: list[dict[str, Any]] = []
+        for condition_id, meta in actor["conditions"].items():
+            if not isinstance(meta, dict):
+                continue
+            repeat = meta.get("save_repeat")
+            if not isinstance(repeat, dict):
+                continue
+            ability = str(repeat.get("ability") or "")
+            dc = int(repeat.get("dc", 0) or 0)
+            if not ability or dc <= 0:
+                continue
+            modifier = int(actor["saving_throws"].get(ability, 0) or 0)
+            source_actor_id = str(meta.get("source_actor_id") or "")
+            if ability in flags["auto_fail_saves"]:
+                succeeded = False
+                events.append({
+                    "type": "check.resolved", "kind": "saving_throw", "actor_id": actor_id,
+                    "source_actor_id": source_actor_id, "ability": ability,
+                    "rolls": [], "natural": 0, "modifier": modifier,
+                    "bless_bonus": 0, "total": 0, "target": dc,
+                    "success": False, "auto_failed": True, "repeat_save": True,
+                })
+            else:
+                rage_advantage = "rage" in actor["conditions"] and ability == "str"
+                first = int(rng.randint(1, 20))
+                second = int(rng.randint(1, 20)) if rage_advantage else None
+                roll = max(first, second) if second is not None else first
+                bless = int(rng.randint(1, 4)) if "blessed" in actor["conditions"] else 0
+                total = roll + modifier + bless
+                succeeded = total >= dc
+                check_event = {
+                    "type": "check.resolved", "kind": "saving_throw", "actor_id": actor_id,
+                    "source_actor_id": source_actor_id, "ability": ability,
+                    "rolls": [value for value in (first, second) if value is not None],
+                    "natural": roll, "modifier": modifier, "bless_bonus": bless,
+                    "total": total, "target": dc, "success": succeeded,
+                    "repeat_save": True,
+                }
+                if rage_advantage:
+                    check_event["advantage_mode"] = "advantage"
+                    check_event["advantage_sources"] = [
+                        {"code": "rage", "mode": "advantage"},
+                    ]
+                events.append(check_event)
+            if succeeded:
+                # 只终止该目标身上的效应；施法者专注与其余目标继续。
+                events.append({
+                    "type": "condition.removed", "target_id": actor_id,
+                    "condition": condition_id, "reason": "save_repeat",
+                })
+        return events
+
+    def _end_turn_events(
+        self, instance: Any, combat: dict[str, Any], rng: Any,
+    ) -> list[dict[str, Any]]:
         order = list(combat["initiative"])
         if not any(
             int(enemy.get("hp", 0) or 0) > 0
@@ -818,6 +986,8 @@ class CombatResolutionMixin:
             )
             return [{"type": "dnd2024.combat.ended", "reason": reason}]
         previous_index = int(combat["turn_index"])
+        # 目标自己回合结束时的重复豁免；早退路径（战斗已结束）不 tick。
+        events = self._save_repeat_events(instance, combat, order[previous_index], rng)
         next_index = previous_index
         wraps = 0
         for _ in range(len(order)):
@@ -834,12 +1004,13 @@ class CombatResolutionMixin:
         next_round = int(combat["round"]) + wraps
         next_actor = order[next_index]
         next_view = self._actor_view(instance, combat, next_actor)
-        return [{
+        events.append({
             "type": "dnd2024.turn.advanced", "round": next_round,
             "turn_index": next_index, "actor_id": next_actor,
             "previous_actor_id": order[previous_index],
             "economy": self._fresh_economy(next_view),
-        }]
+        })
+        return events
 
     def _death_save_events(
         self, instance: Any, combat: dict[str, Any], intent: dict[str, Any], rng: Any,
@@ -871,7 +1042,7 @@ class CombatResolutionMixin:
                 "roll": roll, "successes": min(successes, 3), "failures": min(failures, 3),
                 "stable": stable, "dead": dead, "hp": hp,
             },
-            *([] if dead or hp else self._end_turn_events(instance, combat)),
+            *([] if dead or hp else self._end_turn_events(instance, combat, rng)),
         ]
 
     def _stabilize_events(

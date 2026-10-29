@@ -468,6 +468,12 @@ class CombatValidationMixin:
         damage_choices = effect.get("damage_type_choice")
         if damage_choices and intent.get("damage_type") not in damage_choices:
             raise CombatIntentError("spell damage_type choice is required")
+        resist_choices = effect.get("resist_choice")
+        if resist_choices:
+            if intent.get("resist_type") not in resist_choices:
+                raise CombatIntentError("spell resist_type choice is required")
+        elif intent.get("resist_type") is not None:
+            raise CombatIntentError("this spell does not take a resist_type")
 
     @staticmethod
     def _validate_player_positions(instance: Any, positions: Any) -> None:

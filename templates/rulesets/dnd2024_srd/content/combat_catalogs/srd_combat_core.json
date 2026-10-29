@@ -72,7 +72,11 @@
     "invisibility": {"mode": "buff", "range": 5, "target_count": 1, "upcast_target_count": 1, "condition": "invisible", "condition_duration": "concentration", "concentration": true, "ends_on": ["attack_roll", "damage_dealt", "spell_cast"]},
     "greater_invisibility": {"mode": "buff", "range": 5, "target_count": 1, "condition": "invisible", "condition_duration": "concentration", "concentration": true},
     "blur": {"mode": "buff", "range": 5, "target_count": 1, "condition": "blurred", "condition_duration": "concentration", "concentration": true},
-    "see_invisibility": {"mode": "buff", "range": 5, "target_count": 1, "condition": "see_invisibility", "condition_duration": "1_hour"}
+    "see_invisibility": {"mode": "buff", "range": 5, "target_count": 1, "condition": "see_invisibility", "condition_duration": "1_hour"},
+    "stoneskin": {"mode": "buff", "range": 5, "target_count": 1, "condition": "stoneskinned", "condition_duration": "concentration", "concentration": true},
+    "protection_from_energy": {"mode": "buff", "range": 5, "target_count": 1, "condition": "energy_resistant", "condition_duration": "concentration", "concentration": true, "resist_choice": ["acid", "cold", "fire", "lightning", "thunder"]},
+    "protection_from_poison": {"mode": "buff", "range": 5, "target_count": 1, "condition": "poison_resistant", "condition_duration": "1_hour", "removes_conditions": ["poisoned"]},
+    "fire_shield": {"mode": "buff", "range": 5, "target_count": 1, "condition": "fire_shield_resistant", "condition_duration": "10_minute", "resist_choice": ["fire", "cold"]}
   },
   "conditions": {
     "next_attack_advantage": {"attack_modes": [{"side": "target", "mode": "advantage", "consume_on": "attack_resolved"}]},
@@ -83,6 +87,9 @@
     "invisible": {"attack_modes": [
       {"side": "target", "mode": "disadvantage", "negated_by": ["see_invisibility", "truesight"]},
       {"side": "actor", "mode": "advantage", "negated_by": ["see_invisibility", "truesight"]}
-    ]}
+    ]},
+    "rage": {"resist_damage_types": ["bludgeoning", "piercing", "slashing"]},
+    "stoneskinned": {"resist_damage_types": ["bludgeoning", "piercing", "slashing"]},
+    "poison_resistant": {"resist_damage_types": ["poison"]}
   }
 }

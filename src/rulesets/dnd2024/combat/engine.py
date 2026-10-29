@@ -647,7 +647,7 @@ class Dnd2024CombatEngine(
         elif intent_type in {"dash", "dodge", "disengage"}:
             events.extend(self._basic_action_events(combat, intent_type, str(intent["actor_id"])))
         elif intent_type == "end_turn":
-            events.extend(self._end_turn_events(instance, combat))
+            events.extend(self._end_turn_events(instance, combat, rng))
         elif intent_type == "death_save":
             events.extend(self._death_save_events(instance, combat, intent, rng))
         elif intent_type == "stabilize":
