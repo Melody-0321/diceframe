@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -21,8 +22,11 @@ from src.commands.adventure_effects import (
     AdventureCompletionRejected,
     settle_adventure_completion,
 )
+from src.engine.game_instance import GameInstance
+from src.engine.modules import adventure_runtime_state
 from src.rules.adventure_progression_config import parse_adventure_progression_config
 from src.rules.rule_system import RuleSystem
+from src.webui.api import WebAPI
 from src.webui.services import adventure_runtime
 from tests.test_adventure_v2_runtime import _deps, _install, _instance
 
@@ -431,6 +435,77 @@ async def test_stale_confirmation_failure_keeps_proposal(tmp_path):
     ) is None
     assert discarded == []
     assert _suggestions(instance)
+
+
+@pytest.mark.asyncio
+async def test_webapi_persistence_failure_rolls_back_and_retry_persists_save(
+    tmp_path,
+):
+    """A real WebAPI confirmation keeps the proposal after registry.save fails.
+
+    The first attempt exercises the production ``WebAPI`` confirmation closure,
+    including its before-image rollback.  The second attempt uses the same
+    instance and the same proposal, then verifies that the successfully saved
+    payload can be reconstructed as an ordinary persisted game.
+    """
+
+    resolver = _install(tmp_path, QUEST_GRAPH)
+    instance = _instance(resolver)
+    runtime_deps = _deps(resolver)
+    adventure_runtime.initialize_adventure_run(runtime_deps, instance)
+    instance.log.append({
+        "round": 1, "gm_response": "第一幕结束。", "actions": [],
+    })
+    _suggest(instance, "start")
+
+    class FlakyRegistry:
+        def __init__(self):
+            self.save_calls = 0
+            self.persisted: dict | None = None
+
+        def get(self, game_key):
+            assert game_key == instance.game_key
+            return instance
+
+        async def save(self, target):
+            self.save_calls += 1
+            if self.save_calls == 1:
+                raise OSError("temporary registry failure")
+            self.persisted = deepcopy(target.to_dict())
+
+    registry = FlakyRegistry()
+    api = WebAPI.__new__(WebAPI)
+    api._reg = registry
+    api._adventure_runtime_dependencies = runtime_deps
+    api._handler = None
+    api._llm_client = None
+    api._load_rule_for_game = lambda _instance: SimpleNamespace(
+        adventure_progression=SimpleNamespace(
+            auto_confirm_completion=True,
+            activation_narration=False,
+        ),
+    )
+
+    first = await api._settle_adventure_completion_for(instance)
+    assert first is None
+    assert registry.save_calls == 1
+    assert adventure_runtime_state.progress(instance)["completed_nodes"] == []
+    assert _suggestions(instance)
+
+    second = await api._settle_adventure_completion_for(instance)
+    assert second == {
+        "node_id": "start",
+        "activated_nodes": ["mid"],
+        "transition_narration": "",
+    }
+    assert registry.save_calls == 2
+    assert registry.persisted is not None
+
+    restored = GameInstance.from_dict(registry.persisted)
+    restored_progress = adventure_runtime_state.progress(restored)
+    assert restored_progress["completed_nodes"] == ["start"]
+    assert restored_progress["active_nodes"] == ["mid"]
+    assert restored_progress["completion_suggestions"] == []
 
 
 def _fake_settle(node_id, activated, transition):
