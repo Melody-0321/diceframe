@@ -15,17 +15,34 @@ def context_id(engine: Any, instance: Any) -> str:
     return f"combat:{int(ruleset_runtime.state(instance).get('version', 0))}:{current}"
 
 
-def attack_sources(actor: dict, target: dict, range_disadvantage: bool) -> list[dict]:
+def attack_sources(
+    registry: dict[str, dict], actor: dict, target: dict, range_disadvantage: bool,
+) -> list[dict]:
+    """Collect the registry-declared attack modifiers for this attack roll.
+
+    A condition declares whether it matters when it sits on the attacker
+    (``side == "actor"``) or on the target (``side == "target"``). ``negated_by``
+    is checked against the *observer* -- the attacker for target-side
+    declarations, the target for actor-side ones -- so a creature that can see
+    through the trick does not grant/benefit from it.
+
+    ``long_range`` stays code-generated: it is a positional fact of the attack,
+    not a condition.
+    """
+
     sources = []
-    for code in ("next_attack_advantage", "faerie_fire"):
-        if code in target["conditions"]:
-            sources.append({"code": code, "mode": "advantage"})
+    for condition_id, entry in registry.items():
+        for declaration in entry.get("attack_modes") or []:
+            on_actor = declaration["side"] == "actor"
+            holder = actor if on_actor else target
+            observer = target if on_actor else actor
+            if condition_id not in holder["conditions"]:
+                continue
+            if any(code in observer["conditions"] for code in declaration.get("negated_by") or []):
+                continue
+            sources.append({"code": condition_id, "mode": declaration["mode"]})
     if range_disadvantage:
         sources.append({"code": "long_range", "mode": "disadvantage"})
-    if "dodging" in target["conditions"]:
-        sources.append({"code": "dodging", "mode": "disadvantage"})
-    if "next_attack_disadvantage" in actor["conditions"]:
-        sources.append({"code": "next_attack_disadvantage", "mode": "disadvantage"})
     return sources
 
 
@@ -36,7 +53,7 @@ def mode_from_sources(sources: list[dict]) -> str:
 
 def attack_mode(engine: Any, instance: Any, actor: dict, target: dict,
                 range_disadvantage: bool, *, use_grant: bool = True) -> dict:
-    sources = attack_sources(actor, target, range_disadvantage)
+    sources = attack_sources(engine.catalog.conditions, actor, target, range_disadvantage)
     if use_grant and actor["kind"] == "player":
         grant = scoped(instance, actor["actor_id"].removeprefix("player:"), context_id(engine, instance)).get("grant")
         if grant:

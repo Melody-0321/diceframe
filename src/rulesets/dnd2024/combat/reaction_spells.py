@@ -203,6 +203,9 @@ class CombatReactionSpellsMixin:
             return events
         if intent["option"] == "cast":
             defender = self._actor_view(instance, combat, defender_id)
+            # 施放反应法术同样是一条 "spell_cast" 触发：被隐形术保护的防御者
+            # 用护盾术反击时会终止自己的隐形术。
+            events.extend(self._spell_end_trigger_events(defender, "spell_cast"))
             spell_ref = str(intent["spell_ref"])
             spell = self.spells.get(spell_ref)
             effect = self.catalog.spell_effects[spell_ref.removeprefix("spell:")]

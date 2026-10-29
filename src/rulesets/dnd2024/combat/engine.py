@@ -1037,30 +1037,31 @@ class Dnd2024CombatEngine(
             "attacks_per_action": self._attacks_per_action(actor),
         }
 
-    @staticmethod
-    def _attack_modes(
-        actor: dict[str, Any], target: dict[str, Any], range_disadvantage: bool,
-    ) -> tuple[bool, bool]:
-        from .check_modes import attack_sources, mode_from_sources
-
-        mode = mode_from_sources(attack_sources(actor, target, range_disadvantage))
-        return mode == "advantage", mode == "disadvantage"
-
-    @staticmethod
     def _consume_attack_conditions(
-        actor_id: str, target_id: str, actor: dict[str, Any], target: dict[str, Any],
+        self, actor_id: str, target_id: str, actor: dict[str, Any], target: dict[str, Any],
     ) -> list[dict[str, Any]]:
+        """Remove every condition the registry marks consumed by one attack roll.
+
+        The old hard-coded pair lives in catalog data now; the observable
+        behaviour is unchanged: whichever side a consuming declaration names,
+        that holder loses the condition after the attack is resolved.
+        """
+
         events = []
-        if "next_attack_disadvantage" in actor["conditions"]:
-            events.append({
-                "type": "condition.removed", "target_id": actor_id,
-                "condition": "next_attack_disadvantage",
-            })
-        if "next_attack_advantage" in target["conditions"]:
-            events.append({
-                "type": "condition.removed", "target_id": target_id,
-                "condition": "next_attack_advantage",
-            })
+        for condition_id, entry in self.catalog.conditions.items():
+            for declaration in entry.get("attack_modes") or []:
+                if declaration.get("consume_on") != "attack_resolved":
+                    continue
+                holder_id, holder = (
+                    (actor_id, actor) if declaration["side"] == "actor"
+                    else (target_id, target)
+                )
+                if condition_id in holder["conditions"]:
+                    events.append({
+                        "type": "condition.removed", "target_id": holder_id,
+                        "condition": condition_id,
+                    })
+                    break
         return events
 
     @staticmethod

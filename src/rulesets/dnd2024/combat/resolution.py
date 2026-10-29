@@ -95,6 +95,49 @@ class CombatResolutionMixin:
             "adventure_binding": deepcopy(intent.get("adventure_binding")),
         }
 
+    @staticmethod
+    def _spell_end_trigger_events(
+        actor: dict[str, Any], trigger: str,
+    ) -> list[dict[str, Any]]:
+        """Events that end spells whose condition declares ``ends_on`` ``trigger``.
+
+        Read from the *pre-resolution* actor view, so a condition applied by the
+        very spell cast in this batch is never ended by that same cast: the old
+        spell ends, the new one takes over intact.
+
+        A condition owned by a concentration spell ends the whole spell: one
+        ``dnd2024.concentration.ended`` per owner, and the existing reducer
+        cascade removes every condition the owner had applied (to all targets).
+        Conditions with no owner are removed individually.
+
+        ``damage_dealt`` is a declared trigger code without its own call site:
+        every damage in the engine originates from an attack roll or a spell
+        cast, and both of those already trigger first.
+        """
+
+        events: list[dict[str, Any]] = []
+        owners: set[str] = set()
+        for condition_id, meta in (actor.get("conditions") or {}).items():
+            if not isinstance(meta, dict):
+                continue
+            if trigger not in (meta.get("ends_on") or []):
+                continue
+            owner = str(meta.get("concentration_owner") or "")
+            if not owner:
+                events.append({
+                    "type": "condition.removed", "target_id": actor["actor_id"],
+                    "condition": condition_id,
+                })
+                continue
+            if owner in owners:
+                continue
+            owners.add(owner)
+            events.append({
+                "type": "dnd2024.concentration.ended", "actor_id": owner,
+                "reason": "spell_ended_early",
+            })
+        return events
+
     def _attack_events(
         self, instance: Any, combat: dict[str, Any], intent: dict[str, Any], rng: Any,
         *, spend_attack_action: bool = True,
@@ -169,9 +212,12 @@ class CombatResolutionMixin:
         target_ac = effective_armor_class(target)
         critical = natural == 20
         hit = natural != 1 and (critical or total >= target_ac)
-        events: list[dict[str, Any]] = (
-            [self._attack_cost_event(combat, actor)] if spend_attack_action else []
-        )
+        events: list[dict[str, Any]] = [
+            # 提前终止先于消耗支付落账：预约的是"发起攻击检定"这一事实，
+            # 命中与否、动作是否还能支付都不影响它（借机攻击同样触发）。
+            *self._spell_end_trigger_events(actor, "attack_roll"),
+            *([self._attack_cost_event(combat, actor)] if spend_attack_action else []),
+        ]
         check_event = {
             "type": "check.resolved", "kind": "attack", "actor_id": actor_id,
             "advantage_mode": check_mode["mode"], "advantage_sources": check_mode["sources"],
@@ -262,9 +308,17 @@ class CombatResolutionMixin:
         if not isinstance(target_ids, list):
             target_ids = [intent.get("target_id")]
         target_ids = [str(item) for item in target_ids if item]
-        events: list[dict[str, Any]] = self._spell_cost_events(actor, spell, slot_level)
+        events: list[dict[str, Any]] = [
+            # 施法本身就会终止"施法即结束"的旧法术（例如隐形术的自重刷）。
+            *self._spell_end_trigger_events(actor, "spell_cast"),
+        ]
+        ended_owners = {
+            str(event["actor_id"]) for event in events
+            if event.get("type") == "dnd2024.concentration.ended"
+        }
+        events.extend(self._spell_cost_events(actor, spell, slot_level))
         if effect.get("concentration"):
-            if actor.get("concentration"):
+            if actor.get("concentration") and actor_id not in ended_owners:
                 events.append({
                     "type": "dnd2024.concentration.ended", "actor_id": actor_id,
                     "reason": "new_concentration_spell",
@@ -411,12 +465,16 @@ class CombatResolutionMixin:
                 or mode in {"buff", "debuff"}
             )
             if condition and condition_applies:
-                events.append({
+                applied = {
                     "type": "condition.applied", "target_id": target_id,
                     "condition": condition, "duration": str(effect.get("condition_duration") or ""),
                     "source_actor_id": actor_id,
                     "concentration_owner": actor_id if effect.get("concentration") else "",
-                })
+                }
+                # 服务端从目录效果拷贝提前终止声明；客户端永远无法声明它。
+                if effect.get("ends_on") is not None:
+                    applied["ends_on"] = deepcopy(effect["ends_on"])
+                events.append(applied)
             if succeeded and int(effect.get("push", 0) or 0):
                 direction = 1 if self._position(combat, target_id) >= self._position(combat, actor_id) else -1
                 events.append({
