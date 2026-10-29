@@ -558,11 +558,35 @@ def _rogue(level: int, **extra) -> dict:
     return _character(level, "class:rogue", **extra)
 
 
+def test_rogue_sneak_attack_declaration_loads_as_a_passive_feature() -> None:
+    _runtime, resolver = _resolver()
+    character = _rogue(1)
+
+    assert [feature.id for feature in resolver.features_for(character)] == ["sneak_attack"]
+    feature = resolver.features_for(character)[0]
+    assert feature.capabilities == ()
+    assert feature.resource_id == ""
+    assert resolver.feature_value(character, "sneak_attack", "damage_dice") == "1d6"
+    assert resolver.declared_capability(character, "sneak_attack") is None
+    assert resolver.catalog.label("sneak_attack") == "Sneak Attack"
+
+
+@pytest.mark.parametrize(
+    "level, dice", [(1, "1d6"), (3, "2d6"), (5, "3d6"), (19, "10d6")],
+)
+def test_sneak_attack_dice_follow_the_rogue_progression(level: int, dice: str) -> None:
+    _runtime, resolver = _resolver()
+
+    assert resolver.feature_value(_rogue(level), "sneak_attack", "damage_dice") == dice
+
+
 def test_rogue_uncanny_dodge_declaration_and_capability_load() -> None:
     _runtime, resolver = _resolver()
     character = _rogue(5)
 
-    assert [feature.id for feature in resolver.features_for(character)] == ["uncanny_dodge"]
+    assert [feature.id for feature in resolver.features_for(character)] == [
+        "sneak_attack", "uncanny_dodge",
+    ]
     capability = resolver.declared_capability(character, "uncanny_dodge")
 
     assert capability is not None
@@ -581,7 +605,7 @@ def test_rogue_uncanny_dodge_declaration_and_capability_load() -> None:
 def test_uncanny_dodge_is_not_owned_below_level_five() -> None:
     _runtime, resolver = _resolver()
 
-    assert resolver.features_for(_rogue(4)) == ()
+    assert [feature.id for feature in resolver.features_for(_rogue(4))] == ["sneak_attack"]
     assert resolver.declared_capability(_rogue(4), "uncanny_dodge") is None
 
 
@@ -589,4 +613,5 @@ def test_uncanny_dodge_labels_follow_the_bundle_locale() -> None:
     _runtime, chinese = _resolver("zh-CN")
 
     assert chinese.catalog.label("rogue") == "游荡者"
+    assert chinese.catalog.label("sneak_attack") == "偷袭"
     assert chinese.catalog.label("uncanny_dodge") == "直觉闪避"

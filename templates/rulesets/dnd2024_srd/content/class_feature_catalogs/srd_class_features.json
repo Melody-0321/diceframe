@@ -27,6 +27,7 @@
     "rage": "Rage",
     "rage_sustain": "Sustain Rage",
     "rogue": "Rogue",
+    "sneak_attack": "Sneak Attack",
     "uncanny_dodge": "Uncanny Dodge"
   },
   "classes": {
@@ -208,6 +209,16 @@
     "rogue": {
       "source_ref": "srd-5.2.1:p61:rogue-features",
       "features": [
+        {
+          "id": "sneak_attack",
+          "minimum_level": 1,
+          "source_ref": "srd-5.2.1:p61:sneak-attack",
+          "summary": "Once per turn, when you hit with an attack using a Finesse or Ranged weapon, deal extra damage if you have Advantage, or if an ally who is not Incapacitated is within 5 feet of the target and you do not have Disadvantage. The damage type matches the weapon.",
+          "parameters": {
+            "damage_dice_track": "sneak_attack_dice",
+            "damage_dice_format": "{die}d6"
+          }
+        },
         {
           "id": "uncanny_dodge",
           "minimum_level": 5,

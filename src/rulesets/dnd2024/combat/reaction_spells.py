@@ -197,7 +197,7 @@ class CombatReactionSpellsMixin:
                 return events
             damage_event["amount"] = amount
             damage_event["delta"] = -amount
-            events.append(damage_event)
+            events.extend(self._submit_hit_damage(damage_event))
             defender = self._actor_view(instance, combat, defender_id)
             events.extend(self._concentration_events(defender, amount, rng))
             return events
@@ -241,8 +241,10 @@ class CombatReactionSpellsMixin:
         if isinstance(next_decision, dict):
             events.append({"type": "dnd2024.decision.pending", **deepcopy(next_decision)})
             return events
+        # Shield 没有改变结果（或只是被放弃）：命中成立，最终提交基础伤害，
+        # 连同延迟记录的特性使用。
         damage_event = deepcopy(decision["damage_event"])
-        events.append(damage_event)
+        events.extend(self._submit_hit_damage(damage_event))
         defender = self._actor_view(instance, combat, defender_id)
         events.extend(self._concentration_events(defender, int(damage_event["amount"]), rng))
         return events

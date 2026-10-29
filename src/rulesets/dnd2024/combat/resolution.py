@@ -187,18 +187,23 @@ class CombatResolutionMixin:
                 "condition": "rage",
             })
         if hit:
-            # 伤害骰经通用公式 AST 求值（Issue 212）：主骰 → 附加骰（魔化）
-            # → 属性修正；重击翻倍仍由本层在 AST 上显式表达。
-            extra_dice = None
+            # 伤害骰经通用公式 AST 求值（Issue 212）：主骰 → 附加骰（魔化、
+            # 偷袭，按调用方顺序）→ 属性修正；重击翻倍仍由本层在 AST 上显式表达。
+            extra_dice: list[str] = []
             if "hexed" in target["conditions"] and target["conditions"]["hexed"].get(
                 "source_actor_id"
             ) == actor_id:
-                extra_dice = "1d6"
+                extra_dice.append("1d6")
+            sneak_dice = self._sneak_attack_dice(
+                instance, combat, actor, target, weapon, check_mode,
+            )
+            if sneak_dice:
+                extra_dice.append(sneak_dice)
             damage_node = attack_damage_node(
                 damage_formula=damage_formula,
                 modifier=modifier,
                 critical=critical,
-                extra_dice_formula=extra_dice,
+                extra_dice_formulas=extra_dice,
             )
             if ability == "str" and "rage" in actor["conditions"]:
                 # 狂暴加值只在力量攻击命中时附加到伤害，不影响攻击加值。
@@ -216,6 +221,15 @@ class CombatResolutionMixin:
                 "delta": -damage, "amount": damage, "damage_type": damage_type,
                 "critical": critical, "rolls": rolls,
             }
+            if sneak_dice:
+                # 延迟提交：只有这次命中伤害最终落地才记一次偷袭使用。
+                # Shield 改判落空时不会走到提交辅助方法，因此不会记账。
+                damage_event["feature_use"] = {
+                    "actor_id": actor_id,
+                    "feature_id": "sneak_attack",
+                    "round": int(combat.get("round", 0)),
+                    "turn_index": int(combat.get("turn_index", 0)),
+                }
             offer = self._hit_spell_offer(instance, combat, actor, weapon, target_id, damage_event, intent)
             reaction = self._hit_reaction_offer(
                 instance, combat, actor, target, check_event, damage_event, intent,
@@ -224,7 +238,7 @@ class CombatResolutionMixin:
             if reaction or offer:
                 events.append({"type": "dnd2024.decision.pending", **(reaction or offer)})
             else:
-                events.append(damage_event)
+                events.extend(self._submit_hit_damage(damage_event))
                 events.extend(self._concentration_events(target, damage, rng))
                 if self._last_hostile_defeated(combat, target, damage):
                     events.append({"type": "dnd2024.combat.ended", "reason": "victory"})
@@ -446,6 +460,112 @@ class CombatResolutionMixin:
             "type": "dnd2024.position.changed", "actor_id": actor_id,
             "distance": distance, "movement_cost": abs(distance), "forced": False,
         }]
+
+    @staticmethod
+    def _submit_hit_damage(damage_event: dict[str, Any]) -> list[dict[str, Any]]:
+        """Commit a final hit's damage, then any deferred feature use.
+
+        Hit damage is rolled once and held while the defender decides on
+        Shield/Uncanny Dodge or the attacker decides on a hit-triggered spell.
+        Only the paths that actually land the damage call this helper, so a
+        reaction that turns the hit into a miss never records a feature use.
+        The internal ``feature_use`` metadata never reaches the wire shape of
+        ``resource.changed``.
+        """
+
+        event = deepcopy(damage_event)
+        feature_use = event.pop("feature_use", None)
+        events: list[dict[str, Any]] = [event]
+        if isinstance(feature_use, dict):
+            events.append({"type": "dnd2024.feature.used", **feature_use})
+        return events
+
+    @staticmethod
+    def _feature_used_this_turn(
+        combat: dict[str, Any], actor_id: str, feature_id: str,
+    ) -> bool:
+        """Whether ``actor_id`` already used ``feature_id`` in this exact turn.
+
+        The ledger is keyed by the actor who made the attack and by
+        ``round`` + ``turn_index`` of the turn it happened in.  It is deliberately
+        not the current economy: an opportunity attack is made on someone
+        else's turn, and the same actor may use a once-per-turn feature again
+        there.
+        """
+
+        usage = combat.get("feature_usage")
+        record = usage.get(actor_id) if isinstance(usage, dict) else None
+        if not isinstance(record, dict):
+            return False
+        if int(record.get("round", -1)) != int(combat.get("round", 0)):
+            return False
+        if int(record.get("turn_index", -1)) != int(combat.get("turn_index", 0)):
+            return False
+        return str(feature_id) in {str(item) for item in record.get("feature_ids") or []}
+
+    def _qualifying_sneak_ally(
+        self, instance: Any, combat: dict[str, Any], actor: dict[str, Any],
+        target: dict[str, Any],
+    ) -> bool:
+        """An ally of the attacker within 5 feet of the target, able to help.
+
+        Every clause is rule text: the ally must be the *attacker's* ally, must
+        be alive and not Incapacitated (paralyzed/petrified/stunned/unconscious
+        all imply it), and the distance checked is ally-to-target.
+        """
+
+        actor_side = str(actor.get("side") or "")
+        target_id = str(target["actor_id"])
+        for row in self._all_targets(instance, combat):
+            ally_id = str(row["actor_id"])
+            if ally_id == actor["actor_id"] or str(row.get("side") or "") != actor_side:
+                continue
+            if int(row.get("hp", 0) or 0) <= 0:
+                continue
+            ally = self._actor_view(instance, combat, ally_id)
+            conditions = ally.get("conditions") or {}
+            if any(
+                code in conditions for code in (
+                    "defeated", "dead", "incapacitated", "paralyzed", "petrified",
+                    "stunned", "unconscious",
+                )
+            ):
+                continue
+            if self._distance(combat, ally_id, target_id) <= 5:
+                return True
+        return False
+
+    def _sneak_attack_dice(
+        self, instance: Any, combat: dict[str, Any], actor: dict[str, Any],
+        target: dict[str, Any], weapon: dict[str, Any], check_mode: dict[str, Any],
+    ) -> str | None:
+        """The Sneak Attack dice this hit may add, or ``None``.
+
+        Ownership, once-per-turn, weapon property, and the advantage/ally
+        predicate are checked in that order.  A rogue who owns the feature but
+        whose table value cannot be read fails closed instead of silently
+        dealing no extra damage.
+        """
+
+        character = self._feature_character(actor)
+        if not self.features.has_feature(character, "sneak_attack"):
+            return None
+        if self._feature_used_this_turn(combat, str(actor["actor_id"]), "sneak_attack"):
+            return None
+        # 武器属性来自目录的 finesse / ranged；投掷一把非灵巧近战武器
+        # （ranged_use）不会让它变成远程武器。
+        if not (weapon.get("finesse") or weapon.get("ranged")):
+            return None
+        if check_mode["mode"] != "advantage":
+            if check_mode["mode"] == "disadvantage":
+                return None
+            if not self._qualifying_sneak_ally(instance, combat, actor, target):
+                return None
+        dice = self.features.feature_value(character, "sneak_attack", "damage_dice", "")
+        if not isinstance(dice, str) or not dice:
+            raise CombatIntentError("sneak attack damage dice are unavailable")
+        formula_node_from_dice_formula(dice)
+        return dice
 
     @staticmethod
     def _spend_action_resource(combat: dict[str, Any]) -> str:
@@ -714,13 +834,19 @@ class CombatResolutionMixin:
         if intent["option"] == "resolve":
             threat_id = str(decision["threat_actor_ids"][0])
             threat = self._actor_view(instance, combat, threat_id)
-            attack = threat["attacks"][0]
             attack_intent = {
                 "intent_id": f"{decision['decision_id']}:attack",
                 "actor_id": threat_id,
                 "target_id": str(movement["actor_id"]),
-                "attack_id": str(attack["id"]),
             }
+            if threat["kind"] == "enemy":
+                attack_intent["attack_id"] = str(threat["attacks"][0]["id"])
+            else:
+                # 玩家/队友的借机攻击复用其已装备武器的既有攻击档案；
+                # 没有可声明武器时按既有规则失败，不臆造档案。
+                attack_intent["weapon_ref"] = str(
+                    self._available_attacks(threat)[0]["weapon_ref"]
+                )
             opportunity = self._attack_events(instance, combat, attack_intent, rng)
             opportunity[0] = {
                 "type": "dnd2024.reaction.spent", "actor_id": threat_id,

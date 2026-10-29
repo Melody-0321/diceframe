@@ -92,6 +92,7 @@ class CombatReducerMixin:
                 "economy": deepcopy(event["economy"]),
                 "pending_decisions": [], "position_mode": event["position_mode"],
                 "reactions": deepcopy(event["reactions"]),
+                "feature_usage": {},
                 "encounter_instance_id": str(event.get("encounter_instance_id") or ""),
                 "encounter_preset_id": str(event.get("encounter_preset_id") or ""),
                 "origin_step_id": str(event.get("origin_step_id") or ""),
@@ -149,6 +150,32 @@ class CombatReducerMixin:
                 economy[str(key)] = int(economy.get(str(key), 0) or 0) + amount
             for key, value in flags.items():
                 economy[str(key)] = value
+            return
+        if event_type == "dnd2024.feature.used":
+            # 「每回合一次」按真实攻击者 + 具体回合（round + turn_index）记账。
+            # 借机攻击发生在别人的回合，因此不能读当前行动者的 economy。
+            actor_id = str(event["actor_id"])
+            round_index = int(event["round"])
+            turn_index = int(event["turn_index"])
+            feature_id = str(event["feature_id"])
+            usage = combat.setdefault("feature_usage", {})
+            if not isinstance(usage, dict):
+                raise EventBatchError("feature usage ledger is invalid")
+            record = usage.get(actor_id)
+            if (
+                not isinstance(record, dict)
+                or int(record.get("round", -1)) != round_index
+                or int(record.get("turn_index", -1)) != turn_index
+            ):
+                usage[actor_id] = {
+                    "round": round_index, "turn_index": turn_index,
+                    "feature_ids": [feature_id],
+                }
+                return
+            feature_ids = record.setdefault("feature_ids", [])
+            if feature_id in feature_ids:
+                raise EventBatchError(f"feature is already used this turn: {feature_id}")
+            feature_ids.append(feature_id)
             return
         if event_type == "dnd2024.class_resource.spent":
             # 职业资源永远写在既有的 canonical resources.class 结构里，
