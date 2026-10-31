@@ -48,6 +48,8 @@ class CombatReactionSpellsMixin:
             return []
         if condition_flags(self.catalog.conditions, defender["conditions"])["incapacitated"]:
             return []
+        if "rage" in defender["conditions"]:
+            return []
         choices = []
         for ref in defender["spell_refs"]:
             spell = self.spells.get(ref)
