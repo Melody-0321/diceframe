@@ -16,6 +16,7 @@ from .action_adapter import (
 )
 from .primitives import (
     CombatIntentError,
+    RAGE_MAX_ROUNDS,
     UNARMED_STRIKE_REF,
     actor_kind as _actor_kind,
     canonical as _canonical,
@@ -116,8 +117,7 @@ class CombatResolutionMixin:
             # "在远处使用" 不等于 "这是远程武器"。属性选择只应被前者（真远程武器）
             # 排除，否则武僧把长矛/手斧扔出去就会被强制成 DEX。
             is_ranged_weapon = bool(weapon.get("ranged"))
-            ranged_use = is_ranged_weapon or distance > 5
-            ability = "dex" if ranged_use else "str"
+            ability = "dex" if is_ranged_weapon else "str"
             if weapon.get("finesse"):
                 ability = max(("str", "dex"), key=lambda key: ability_modifier(actor["abilities"][key]))
             # 职业特性投影出来的属性选择（武艺：徒手打击与 Monk Weapon 都可以改用
@@ -579,7 +579,7 @@ class CombatResolutionMixin:
         if self._feature_used_this_turn(combat, str(actor["actor_id"]), "sneak_attack"):
             return None
         # 武器属性来自目录的 finesse / ranged；投掷一把非灵巧近战武器
-        # （ranged_use）不会让它变成远程武器。
+        # 不会让它变成远程武器。
         if not (weapon.get("finesse") or weapon.get("ranged")):
             return None
         if check_mode["mode"] != "advantage":
@@ -599,14 +599,14 @@ class CombatResolutionMixin:
 
         Action Surge grants a separate ``surge_action`` pool precisely so the
         Magic action can never spend it: spell costs only read ``action`` /
-        ``bonus_action``.  The ordinary action is always consumed first, which
-        keeps payment deterministic.
+        ``bonus_action``.  A non-magical action therefore spends the surge pool
+        first, keeping the ordinary action free for a later Magic action.
         """
 
         economy = combat.get("economy", {}) or {}
-        if int(economy.get("action", 0) or 0) > 0:
-            return "action"
-        return "surge_action"
+        if int(economy.get("surge_action", 0) or 0) > 0:
+            return "surge_action"
+        return "action"
 
     @staticmethod
     def _basic_action_events(
@@ -712,15 +712,21 @@ class CombatResolutionMixin:
                     **({"blocked_by": "cannot_regain_hp"} if blocked else {}),
                 })
             elif action.kind == "rage":
+                # 狂暴不能维持专注：进入狂暴即结束正在维持的专注法术。
+                if actor.get("concentration"):
+                    events.append({
+                        "type": "dnd2024.concentration.ended", "actor_id": actor_id,
+                        "reason": "rage",
+                    })
                 events.append({
                     "type": "condition.applied", "target_id": actor_id,
-                    "condition": "rage", "duration": "rage", "turns_remaining": 10,
+                    "condition": "rage", "duration": "rage", "turns_remaining": RAGE_MAX_ROUNDS,
                     "sustained_this_turn": False, "established": False,
                     "source_actor_id": actor_id,
                 })
             elif action.kind == "rage_sustain":
                 # 只刷新续期标记；``turns_remaining`` 由回合结束的到期检查递减，
-                # 延长一次不等于重置十轮上限。
+                # 延长一次不等于重置 10 分钟上限。
                 events.append({
                     "type": "dnd2024.condition.sustained", "target_id": actor_id,
                     "condition": "rage",

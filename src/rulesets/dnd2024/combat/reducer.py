@@ -114,6 +114,15 @@ class CombatReducerMixin:
             combat["status"] = "ended"
             combat["outcome"] = str(event.get("reason") or "ended")
             combat["economy"] = {}
+            # 狂暴靠每回合攻击或附赠动作续期；战斗结束后没有回合可续，
+            # 狂暴随之结束，不能带进下一场战斗。
+            for character in snapshot["characters"].values():
+                (character.get("conditions") or {}).pop("rage", None)
+            companions = (state.get("party") or {}).get("companions") or {}
+            for companion in companions.values():
+                canonical = companion.get("ruleset_character") if isinstance(companion, dict) else None
+                if isinstance(canonical, dict):
+                    (canonical.get("conditions") or {}).pop("rage", None)
             encounter_id = str(combat.get("encounter_instance_id") or "")
             if encounter_id:
                 history = state.setdefault("combat_history", [])

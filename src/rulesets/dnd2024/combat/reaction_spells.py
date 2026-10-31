@@ -44,6 +44,8 @@ class CombatReactionSpellsMixin:
             return []
         if "reaction_blocked" in defender["conditions"] or "shield" in defender["conditions"]:
             return []
+        if "rage" in defender["conditions"]:
+            return []
         choices = []
         for ref in defender["spell_refs"]:
             spell = self.spells.get(ref)

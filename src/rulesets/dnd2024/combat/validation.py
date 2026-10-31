@@ -399,6 +399,8 @@ class CombatValidationMixin:
     ) -> None:
         if actor["kind"] not in {"player", "companion"}:
             raise CombatIntentError("enemy spell profiles are not enabled for this actor")
+        if "rage" in actor["conditions"]:
+            raise CombatIntentError("you cannot cast spells while raging")
         spell_ref = str(intent.get("spell_ref") or "")
         spell = self.spells.get(spell_ref)
         effect = self.catalog.spell_effects.get(spell_ref.removeprefix("spell:"))
