@@ -254,6 +254,10 @@ class CombatResolutionMixin:
                 # 生效，投掷近战武器不适用（与上方 Thrown 语义划分一致）。
                 attack_bonus += int(actor.get("ranged_attack_bonus") or 0)
             damage_formula = str(weapon["damage"])
+            if intent.get("two_handed"):
+                # 两用武器双手持用换用更大的骰式；validation 已保证只有声明
+                # damage_two_handed 的武器才允许声明该意图。
+                damage_formula = str(weapon.get("damage_two_handed") or damage_formula)
             damage_type = str(weapon["damage_type"])
             long_range = int(weapon.get("long_range") or weapon.get("thrown_range") or weapon["range"])
             normal_range = int(weapon.get("thrown_range") or weapon["range"])

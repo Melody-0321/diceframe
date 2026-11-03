@@ -45,6 +45,31 @@ MASTERY_BY_WEAPON = {
     "shortsword": "vex",
     "sickle": "nick",
     "spear": "sap",
+    # D1：SRD 5.2.1 武器表补齐后新增的 23 件。表保持"每把武器必须声明
+    # 一个精通属性"的既有语义，只是覆盖范围扩到完整武器表。
+    "battleaxe": "topple",
+    "blowgun": "vex",
+    "club": "slow",
+    "crossbow_hand": "vex",
+    "crossbow_heavy": "push",
+    "crossbow_light": "slow",
+    "dart": "vex",
+    "glaive": "graze",
+    "greatclub": "push",
+    "halberd": "cleave",
+    "lance": "topple",
+    "light_hammer": "nick",
+    "maul": "topple",
+    "morningstar": "sap",
+    "musket": "slow",
+    "pike": "push",
+    "pistol": "vex",
+    "rapier": "vex",
+    "sling": "slow",
+    "trident": "topple",
+    "war_pick": "sap",
+    "warhammer": "push",
+    "whip": "slow",
 }
 
 _WEAPON_CLASSES = (

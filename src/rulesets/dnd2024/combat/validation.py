@@ -405,6 +405,36 @@ class CombatValidationMixin:
             if str(target.get("side") or "") == str(actor.get("side") or "") or target["hp"] <= 0:
                 raise CombatIntentError("this capability requires a living hostile target")
 
+    def _validate_two_handed(
+        self, actor: dict[str, Any], intent: dict[str, Any], weapon: dict[str, Any],
+    ) -> None:
+        """两用武器双手持用的声明校验。
+
+        保守门控：actor 只有去重后的 ``equipment_refs``，没有副手槽位信息，
+        因此只要身上还有盾或另一把武器就拒绝 —— 宁可少允许一次合法的双手
+        攻击，也不能让"一手盾一手巨剑"通过。精确副手判定属于 slot map 改造，
+        不在本切片（迁移债 D1-3）。
+        """
+
+        declared = intent.get("two_handed")
+        if declared is None or declared is False:
+            return
+        if declared is not True:
+            raise CombatIntentError("two_handed must be a boolean")
+        if actor["kind"] not in {"player", "companion"}:
+            # 敌方 stat block 没有两用概念，其攻击档也不声明该字段。
+            raise CombatIntentError("two_handed is not available to this actor")
+        if not weapon.get("damage_two_handed"):
+            raise CombatIntentError("this weapon has no two-handed damage")
+        weapon_ref = str(weapon.get("weapon_ref") or "")
+        for ref in actor.get("equipment_refs") or []:
+            ref_id = str(ref).removeprefix("item:")
+            item = self.bundle.get("item", ref_id) or {}
+            if item.get("item_type") == "shield":
+                raise CombatIntentError("a shield in the other hand blocks two-handed use")
+            if str(ref) != weapon_ref and ref_id in self.catalog.weapons:
+                raise CombatIntentError("another weapon in the other hand blocks two-handed use")
+
     def _validate_lucky_spend(
         self, instance: Any, intent: dict[str, Any], actor: dict[str, Any],
     ) -> None:
@@ -440,6 +470,7 @@ class CombatValidationMixin:
             # 一个 lookup 同时覆盖装备武器、徒手打击与敌人 attack profile：
             # 客户端无法声明角色并不真正拥有的攻击档案。
             raise CombatIntentError("attack profile is not available to the actor")
+        self._validate_two_handed(actor, intent, weapon)
         self._validate_lucky_spend(instance, intent, actor)
         distance = self._distance(combat, actor["actor_id"], target_id)
         normal_range = int(weapon.get("thrown_range") or weapon.get("range", 5))
