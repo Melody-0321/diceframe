@@ -38,7 +38,7 @@
     "shortsword": {"category": "martial", "damage": "1d6", "damage_type": "piercing", "finesse": true, "light": true, "range": 5, "mastery": "vex"},
     "sickle": {"category": "simple", "damage": "1d4", "damage_type": "slashing", "light": true, "range": 5, "mastery": "nick"},
     "sling": {"category": "simple", "damage": "1d4", "damage_type": "bludgeoning", "ranged": true, "range": 30, "long_range": 120, "mastery": "slow"},
-    "spear": {"category": "simple", "damage": "1d6", "damage_type": "piercing", "range": 5, "long_range": 60, "thrown_range": 20, "mastery": "sap", "damage_two_handed": "1d8"},
+    "spear": {"category": "simple", "damage": "1d6", "damage_type": "piercing", "range": 5, "long_range": 60, "thrown_range": 20, "mastery": "topple", "damage_two_handed": "1d8"},
     "trident": {"category": "martial", "damage": "1d8", "damage_type": "piercing", "range": 5, "long_range": 60, "thrown_range": 20, "damage_two_handed": "1d10", "mastery": "topple"},
     "war_pick": {"category": "martial", "damage": "1d8", "damage_type": "piercing", "range": 5, "damage_two_handed": "1d10", "mastery": "sap"},
     "warhammer": {"category": "martial", "damage": "1d8", "damage_type": "bludgeoning", "range": 5, "damage_two_handed": "1d10", "mastery": "push"},

@@ -44,7 +44,7 @@ MASTERY_BY_WEAPON = {
     "shortbow": "vex",
     "shortsword": "vex",
     "sickle": "nick",
-    "spear": "sap",
+    "spear": "topple",
     # D1：SRD 5.2.1 武器表补齐后新增的 23 件。表保持"每把武器必须声明
     # 一个精通属性"的既有语义，只是覆盖范围扩到完整武器表。
     "battleaxe": "topple",
