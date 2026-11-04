@@ -61,7 +61,10 @@ def resolve(
             "code": "RULESET_REST_UNAVAILABLE",
             "error": "该规则尚未提供专业休息结算",
         }
-    result = method(rule, character, rest, hit_die_rolls)
+    result = method(
+        rule, character, rest, hit_die_rolls,
+        attunement=parsed.get("attunement"),
+    )
     return {"ok": True, "rule_id": rule.rule_id, **result}
 
 
@@ -199,6 +202,9 @@ async def _resolve_live_authority(
         )
     if rest == "long" and parsed.get("hit_dice"):
         return _failure("INVALID_REST", "长休不需要花费生命骰")
+    attunement = parsed.get("attunement")
+    if attunement is not None and not isinstance(attunement, dict):
+        return _failure("INVALID_REST", "attunement 必须是 JSON 对象")
     if parsed.get("confirm_elapsed_time") is not True:
         return _failure("REST_CONFIRMATION_REQUIRED", "请先确认游戏时间会随本次休息推进")
     operation_id = str(parsed.get("operation_id") or "").strip()
@@ -262,7 +268,9 @@ async def _resolve_live_authority(
         hit_die_rolls = _server_hit_die_rolls(
             character, parsed.get("hit_dice") if rest == "short" else None,
         )
-        result = method(rule, character, rest, hit_die_rolls)
+        result = method(
+            rule, character, rest, hit_die_rolls, attunement=attunement,
+        )
     except (TypeError, ValueError) as exc:
         return _failure("INVALID_REST", str(exc))
     updated = deepcopy(character)
@@ -327,6 +335,9 @@ async def _resolve_live_party_authority(
         return _failure("CLIENT_ROLLS_FORBIDDEN", "休息骰由服务端掷出；客户端只需提交要花费的生命骰数量")
     if rest == "long" and parsed.get("hit_dice"):
         return _failure("INVALID_REST", "长休不需要花费生命骰")
+    attunement = parsed.get("attunement")
+    if attunement is not None and not isinstance(attunement, dict):
+        return _failure("INVALID_REST", "attunement 必须是 JSON 对象")
     if parsed.get("confirm_elapsed_time") is not True:
         return _failure("REST_CONFIRMATION_REQUIRED", "请先确认游戏时间会随本次休息推进")
     operation_id = str(parsed.get("operation_id") or "").strip()
@@ -411,6 +422,7 @@ async def _resolve_live_party_authority(
             "operation_id": operation_id,
             "expected_revision": expected_revision,
             "hit_dice": hit_dice,
+            "attunement": deepcopy(attunement),
             "submitted_at": datetime.now(timezone.utc).isoformat(),
         }
         if not required.issubset(participants):
@@ -431,6 +443,7 @@ async def _resolve_live_party_authority(
             result = await resolve_live(dependencies, game_key, uid, {
                 "rest": rest,
                 "hit_dice": item.get("hit_dice", {}),
+                "attunement": item.get("attunement"),
                 "confirm_elapsed_time": True,
                 "expected_revision": item.get("expected_revision"),
                 "operation_id": item.get("operation_id"),

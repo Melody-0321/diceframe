@@ -31,6 +31,7 @@ from src.rulesets.bundle import LoadedRulesetBundle, RulesetBundleLoader
 from src.rulesets.contracts import RulesetCapabilities
 import src.rulesets.dnd2024.advancement_access as advancement_access
 from src.rulesets.dnd2024.binding import rule_binding
+from src.rulesets.dnd2024.character.attunement import unattune_item as _unattune_item
 from src.rulesets.dnd2024.character.builder import Dnd2024CharacterBuilder
 from src.rulesets.dnd2024.character.reconciliation import (
     Dnd2024CharacterStateReconciler,
@@ -825,22 +826,49 @@ class Dnd2024Runtime:
     def complete_rest(
         self, rule: Any, character: dict[str, Any], rest: str,
         hit_die_rolls: dict[str, list[int]] | None = None,
+        attunement: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         del rule
         canonical = character.get("ruleset_character")
         locale = str(canonical.get("locale") or "") if isinstance(canonical, dict) else ""
         bundle = self.load_bundle(locale)
+        if attunement is not None and not isinstance(attunement, dict):
+            # 同调 payload 是明确的窄契约：非对象直接拒绝，不做猜测式解构。
+            raise ValueError("attunement must be an object")
         engine = Dnd2024RestEngine(bundle)
         if rest == "short":
-            result = engine.complete_short_rest(character, hit_die_rolls)
+            result = engine.complete_short_rest(
+                character, hit_die_rolls, attunement=attunement,
+            )
         elif rest == "long":
             if hit_die_rolls:
                 raise ValueError("hit_die_rolls are only valid for a short rest")
+            if attunement:
+                raise ValueError("attunement changes are only valid during a short rest")
             result = engine.complete_long_rest(character)
         else:
             raise ValueError("rest must be short or long")
         result["character"] = self._live_projection(character, result["character"], bundle)
         return result
+
+    def unattune_item(
+        self, rule: Any, character: dict[str, Any], item_ref: Any,
+    ) -> dict[str, Any]:
+        """Active unbinding outside a rest; the 2024 rules require no action."""
+
+        del rule
+        canonical = character.get("ruleset_character")
+        if not isinstance(canonical, dict):
+            raise ValueError("character is missing ruleset_character")
+        locale = str(canonical.get("locale") or "")
+        bundle = self.load_bundle(locale)
+        events = _unattune_item(canonical, character, item_ref, bundle)
+        projected = self._live_projection(character, canonical, bundle)
+        return {
+            "character": projected,
+            "events": events,
+            "attunement": projected.get("attunement"),
+        }
 
     @staticmethod
     def validate_rest_context(instance: Any, actor_id: str, rest: str) -> None:
@@ -1149,7 +1177,7 @@ class Dnd2024Runtime:
             "dnd2024.position.changed", "dnd2024.spell.cast",
             "check.resolved", "resource.changed", "condition.applied",
             "condition.removed", "dnd2024.death_save.resolved",
-            "dnd2024.character.revived",
+            "dnd2024.character.revived", "attune_item", "unattune_item",
         }
         allowed_fields = {
             "type", "kind", "actor_id", "target_id", "text", "natural", "modifier",
@@ -1159,6 +1187,7 @@ class Dnd2024Runtime:
             "check_bonus_rolls",
             "distance", "round", "turn_index", "previous_actor_id", "condition", "reason",
             "spell_ref", "resource", "roll", "successes", "failures", "stable", "dead", "hp",
+            "item_ref",
         }
         combat = (
             ruleset_runtime.state(instance).get("combat")
@@ -1496,10 +1525,21 @@ class Dnd2024Runtime:
         path, where the packages legitimately are the source of truth.
         """
 
+        derived = canonical.get("derived") or {}
         projected = {
             **Dnd2024CharacterBuilder(bundle).project_legacy(canonical),
             "rule_binding": deepcopy(canonical["rule_binding"]),
             "ruleset_character": canonical,
+            # 同调镜像必须随投影一起前进，否则重复投影会因缺段而多记一次 reconcile。
+            "attunement": {
+                "refs": sorted(
+                    str(ref) for ref in (
+                        (canonical.get("attunement") or {}).get("refs") or []
+                    )
+                ),
+                "capacity": int(derived.get("attunement_slots", 3) or 3),
+                "pending": sorted(derived.get("attunement_pending") or []),
+            },
         }
         merged = merge_live_character_projection(current, projected)
         # 带上既有的 revision / operation log，让随后的 reconcile 是在真实历史上

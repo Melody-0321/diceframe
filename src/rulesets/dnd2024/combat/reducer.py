@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from src.rulesets.dnd2024.character.attunement import clear_attunement_on_death
 from src.rulesets.dnd2024.spells.feat_spells import concentration_holder, spend_feat_free_cast
 from src.rulesets.events import EventBatchError
 from .primitives import actor_kind as _actor_kind
@@ -359,6 +360,8 @@ class CombatReducerMixin:
             if event.get("dead"):
                 character["conditions"]["dead"] = {"source": "death_saves"}
                 character["conditions"].pop("unconscious", None)
+                # 死亡终止全部同调；复活不会把绑定还回来。
+                clear_attunement_on_death(character)
             return
         if event_type == "dnd2024.decision.pending":
             combat.setdefault("pending_decisions", []).append({
@@ -448,6 +451,7 @@ class CombatReducerMixin:
                     if death["failures"] >= 3:
                         conditions["dead"] = {"source": "damage_at_zero_hp"}
                         conditions.pop("unconscious", None)
+                        clear_attunement_on_death(character)
             elif delta > 0:
                 conditions.pop("unconscious", None)
                 conditions.pop("stable", None)

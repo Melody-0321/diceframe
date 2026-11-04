@@ -10,8 +10,12 @@ from typing import Any
 from src.engine.player_control import is_ai_controlled
 from src.engine.modules import ruleset_runtime
 from src.rulesets.bundle import LoadedRulesetBundle
+from src.rulesets.dnd2024.character.attunement import attuned_refs
 from src.rulesets.dnd2024.character.builder import ability_modifier
-from src.rulesets.dnd2024.character.reconciliation import merge_live_character_projection
+from src.rulesets.dnd2024.character.reconciliation import (
+    Dnd2024CharacterStateReconciler,
+    merge_live_character_projection,
+)
 from src.rulesets.dnd2024.combat.catalog import Dnd2024CombatCatalog
 from src.rulesets.dnd2024.content.encounter import expand_encounter_enemies
 from src.rulesets.dnd2024.features import (
@@ -52,6 +56,31 @@ from .reaction_spells import (
     CombatReactionSpellsMixin,
     HIT_REACTION_DECISION,
 )
+
+
+def _death_attunement_events(
+    before_characters: dict[str, dict[str, Any]],
+    after_characters: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], set[str]]:
+    """Unbinding audit events and the characters that just died."""
+
+    events: list[dict[str, Any]] = []
+    dead_uids: set[str] = set()
+    for uid, canonical in after_characters.items():
+        previous = before_characters.get(uid) or {}
+        newly_dead = (
+            "dead" in (canonical.get("conditions") or {})
+            and "dead" not in (previous.get("conditions") or {})
+        )
+        if not newly_dead:
+            continue
+        dead_uids.add(uid)
+        lost = sorted(attuned_refs(previous) - attuned_refs(canonical))
+        events.extend(
+            {"type": "unattune_item", "item_ref": ref, "reason": "death"}
+            for ref in lost
+        )
+    return events, dead_uids
 
 
 @dataclass(slots=True)
@@ -856,10 +885,30 @@ class Dnd2024CombatEngine(
                 for uid in instance.players
             },
         }
+        # 死亡清理是 reducer 的副作用，不是客户端提交的事件；记录死亡前后的
+        # 绑定差异，把一次死亡对应的解绑事件补进权威 ledger 与返回批次。
+        before_characters = deepcopy(snapshot["characters"])
         updated, ledger, duplicate = apply_event_batch(
             snapshot, ruleset_runtime.event_ledger(instance), batch, self._reduce_event,
         )
-        if not duplicate:
+        result_batch = deepcopy(batch)
+        if duplicate:
+            stored = next(
+                (item for item in ledger if str(item.get("batch_id") or "") == str(batch["batch_id"])),
+                None,
+            )
+            if isinstance(stored, dict):
+                result_batch = deepcopy(stored)
+        else:
+            derived, dead_uids = _death_attunement_events(
+                before_characters, updated["characters"],
+            )
+            if derived:
+                result_batch["events"] = [*result_batch["events"], *derived]
+                for entry in reversed(ledger):
+                    if str(entry.get("batch_id") or "") == str(batch["batch_id"]):
+                        entry["events"] = deepcopy(result_batch["events"])
+                        break
             ruleset_state = updated["ruleset_state"]
             ruleset_state["version"] = updated["version"]
             ruleset_runtime.replace_state(instance, ruleset_state)
@@ -867,6 +916,12 @@ class Dnd2024CombatEngine(
                 existing = deepcopy(instance.get_character_sheet(uid))
                 projection = merge_live_character_projection(existing, self._project_character(canonical))
                 existing.update(projection)
+                if uid in dead_uids:
+                    # 死亡清空同调后 AC 必须立刻回落到未同调值，不能等下一次
+                    # 换装或休息才纠正。
+                    Dnd2024CharacterStateReconciler(self.bundle).reconcile(
+                        existing, frozenset({"equipment"}),
+                    )
                 instance.set_character_sheet(uid, existing)
             ruleset_runtime.replace_event_ledger(instance, ledger)
         return {
@@ -874,7 +929,7 @@ class Dnd2024CombatEngine(
             "applied": not duplicate,
             "duplicate": duplicate,
             "state_version": int(ruleset_runtime.state(instance).get("version", 0) or 0),
-            "event_batch": deepcopy(batch),
+            "event_batch": result_batch,
             "combat": deepcopy(ruleset_runtime.state(instance).get("combat") or {}),
         }
 

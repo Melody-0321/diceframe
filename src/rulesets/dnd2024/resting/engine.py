@@ -7,7 +7,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.rulesets.bundle import LoadedRulesetBundle
+from src.rulesets.dnd2024.character.attunement import AttunementError
+from src.rulesets.dnd2024.character.attunement import apply_short_rest_attunement
 from src.rulesets.dnd2024.character.builder import ability_modifier
+from src.rulesets.dnd2024.features import Dnd2024ClassFeatureResolver
 from src.rulesets.dnd2024.progression.catalog import Dnd2024ProgressionCatalog
 from src.rulesets.dnd2024.spells.feat_spells import concentration_holder, restore_feat_free_casts
 
@@ -171,6 +174,7 @@ class Dnd2024RestEngine:
 
     def complete_short_rest(
         self, payload: dict[str, Any], hit_die_rolls: dict[str, list[int]] | None = None,
+        attunement: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         character = self.sync_resources(payload)
         self._require_conscious(character, "Short Rest")
@@ -207,6 +211,7 @@ class Dnd2024RestEngine:
                 })
         self._recover_class_resources(character, "short", events)
         self._recover_spell_slots(character, "short", events)
+        events.extend(self._apply_attunement(character, payload, attunement))
         return {
             "character": character,
             "events": events,
@@ -269,6 +274,33 @@ class Dnd2024RestEngine:
             "source_ref": self.rules["long_rest"]["source_ref"],
             "requires_elapsed_time_confirmation": True,
         }
+
+    def _apply_attunement(
+        self, character: dict[str, Any], payload: dict[str, Any],
+        request: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        """Resolve the optional short-rest attunement payload.
+
+        A rejected binding must not lose the rest: the transition is all-or-
+        nothing but the recovery already applied stands, and the rejection is
+        recorded for audit instead of swallowed.
+        """
+
+        if request is None:
+            return []
+        if not isinstance(request, dict):
+            raise RestError("attunement must be an object")
+        try:
+            return apply_short_rest_attunement(
+                character, payload, request, self.bundle,
+                Dnd2024ClassFeatureResolver(self.bundle),
+            )
+        except AttunementError as exc:
+            return [{
+                "type": "attunement_rejected",
+                "item_ref": request.get("attune") or request.get("unattune"),
+                "reason": str(exc),
+            }]
 
     def _class_state(self, character: dict[str, Any]) -> tuple[str, str, int]:
         build = character.get("build")
