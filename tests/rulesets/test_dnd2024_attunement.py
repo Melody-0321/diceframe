@@ -171,6 +171,9 @@ def test_swap_is_atomic_at_full_capacity_and_requires_unbinding_first() -> None:
     assert attuned_refs(swapped["character"]["ruleset_character"]) == {
         second, third, fourth,
     }
+    assert set(
+        swapped["character"]["ruleset_character"]["derived"]["attuned_refs"],
+    ) == {second, third, fourth}
 
 
 def test_capacity_is_base_three_plus_declared_feature_bonus_and_fails_closed() -> None:
@@ -236,6 +239,27 @@ def test_two_copies_of_one_ref_reject_binding_and_unbinding() -> None:
     assert "copies" in rejected["events"][0]["reason"]
 
 
+def test_one_row_with_quantity_two_still_counts_as_two_copies() -> None:
+    runtime, sheet = _runtime()
+    ref = _install_item(runtime, "stacked_amulet")
+    _set_equipment(sheet, [], [ref])
+    sheet["inventory"] = [
+        {"name": ref, "item_ref": ref, "type": "gear", "qty": 2},
+    ]
+
+    rejected = runtime.complete_rest(
+        None, sheet, "short", {}, attunement={"attune": ref},
+    )
+    assert [event["type"] for event in rejected["events"]] == ["attunement_rejected"]
+    assert "copies" in rejected["events"][0]["reason"]
+
+    sheet["ruleset_character"]["attunement"] = {"refs": [ref]}
+    rejected = runtime.complete_rest(
+        None, sheet, "short", {}, attunement={"unattune": ref},
+    )
+    assert "copies" in rejected["events"][0]["reason"]
+
+
 def test_long_rest_keeps_attunement_and_does_not_change_its_state() -> None:
     runtime, sheet = _runtime()
     ref = _install_item(runtime, "long_rest_item")
@@ -275,6 +299,8 @@ def test_long_rest_rejects_attunement_and_short_rest_payload_type_is_strict() ->
 
     with pytest.raises(ValueError, match="short rest"):
         runtime.complete_rest(None, sheet, "long", attunement={"attune": ref})
+    with pytest.raises(ValueError, match="short rest"):
+        runtime.complete_rest(None, sheet, "long", attunement={})
     with pytest.raises(ValueError, match="object"):
         runtime.complete_rest(None, sheet, "short", {}, attunement=[ref])
 
@@ -294,6 +320,13 @@ def test_invalid_short_rest_payload_records_rejection_without_losing_the_rest() 
         None, sheet, "short", {}, attunement={"attune": "item:chain_mail"},
     )
     assert "does not require" in not_attunable["events"][0]["reason"]
+
+    _set_equipment(sheet, ["item:chain_mail"])
+    sheet["ruleset_character"]["attunement"] = {"refs": ["item:chain_mail"]}
+    non_magical_unbind = runtime.complete_rest(
+        None, sheet, "short", {}, attunement={"unattune": "item:chain_mail"},
+    )
+    assert "does not require" in non_magical_unbind["events"][0]["reason"]
 
     _set_equipment(sheet, [], [])
     unowned = runtime.complete_rest(
@@ -316,6 +349,24 @@ def test_invalid_short_rest_payload_records_rejection_without_losing_the_rest() 
         None, sheet, "short", {}, attunement={"unattune": ref},
     )
     assert "not attuned" in not_bound["events"][0]["reason"]
+
+
+def test_duplicate_binding_is_rejected_without_bumping_revision() -> None:
+    runtime, sheet = _runtime()
+    ref = _install_item(runtime, "stable_amulet")
+    _set_equipment(sheet, [ref])
+    canonical = sheet["ruleset_character"]
+    canonical["attunement"] = {"refs": [ref]}
+    _reconciler(runtime).reconcile(sheet, frozenset({"equipment"}))
+    revision = sheet["ruleset_revision"]
+
+    rejected = runtime.complete_rest(
+        None, sheet, "short", {}, attunement={"attune": ref},
+    )
+
+    assert [event["type"] for event in rejected["events"]] == ["attunement_rejected"]
+    assert rejected["character"]["ruleset_revision"] == revision
+    assert canonical["attunement"] == {"refs": [ref]}
 
 
 def test_active_unbinding_is_manual_and_does_not_require_a_rest() -> None:
@@ -352,6 +403,18 @@ def test_old_malformed_and_current_saves_migrate_idempotently() -> None:
     assert migrated is not None
     assert canonical["attunement"] == {"refs": []}
     assert _reconciler(runtime).reconcile(sheet, frozenset({"equipment"})) is None
+
+
+def test_rest_projection_tolerates_a_malformed_attunement_segment() -> None:
+    runtime, sheet = _runtime()
+    ref = _install_item(runtime, "malformed_segment_item")
+    _set_equipment(sheet, [ref])
+    sheet["ruleset_character"]["attunement"] = "broken"
+
+    result = runtime.complete_rest(None, sheet, "short", {})
+
+    assert result["character"]["ruleset_character"]["attunement"] == {"refs": []}
+    assert result["character"]["attunement"]["refs"] == []
 
 
 def test_item_declaration_requires_a_boolean_and_bundle_validation_fails_closed() -> None:

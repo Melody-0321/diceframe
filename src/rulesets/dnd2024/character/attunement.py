@@ -191,6 +191,26 @@ def _row_ref(row: Any) -> str:
     return f"item:{item_key}" if item_key else ""
 
 
+def _row_owned_copies(row: Any) -> int:
+    """Copies represented by one live row; a missing quantity means one.
+
+    ``qty`` is the live inventory/equipment quantity field (see
+    ``commands.state_items``).  Counting rows instead of copies would let a
+    single ``qty: 2`` stack bypass the duplicate guard.
+    """
+
+    if not isinstance(row, Mapping):
+        return 0
+    raw = row.get("qty", 1)
+    if isinstance(raw, bool):
+        return 1
+    try:
+        copies = int(raw)
+    except (TypeError, ValueError):
+        return 1
+    return max(0, copies)
+
+
 def owned_ref_counts(payload: Any) -> dict[str, int]:
     """How many copies of each canonical ref the character owns.
 
@@ -209,7 +229,7 @@ def owned_ref_counts(payload: Any) -> dict[str, int]:
         for row in rows:
             ref = _row_ref(row)
             if ref:
-                counts[ref] = counts.get(ref, 0) + 1
+                counts[ref] = counts.get(ref, 0) + _row_owned_copies(row)
     canonical_refs = (
         (canonical.get("equipment") or {}).get("item_refs")
         if isinstance(canonical, Mapping) else None
@@ -291,6 +311,8 @@ def _validate_unbinding(
 ) -> None:
     if ref not in attuned_refs(canonical):
         raise AttunementError(f"{ref} is not attuned")
+    if not item_requires_attunement(bundle, ref):
+        raise AttunementError(f"{ref} does not require attunement")
     _guard_single_copy(payload, ref, bundle)
 
 

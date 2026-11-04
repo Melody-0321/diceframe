@@ -32,7 +32,10 @@ from src.rulesets.bundle import LoadedRulesetBundle, RulesetBundleLoader
 from src.rulesets.contracts import RulesetCapabilities
 import src.rulesets.dnd2024.advancement_access as advancement_access
 from src.rulesets.dnd2024.binding import rule_binding
-from src.rulesets.dnd2024.character.attunement import unattune_item as _unattune_item
+from src.rulesets.dnd2024.character.attunement import (
+    attunement_state_for_projection,
+    unattune_item as _unattune_item,
+)
 from src.rulesets.dnd2024.character.builder import Dnd2024CharacterBuilder
 from src.rulesets.dnd2024.character.reconciliation import (
     Dnd2024CharacterStateReconciler,
@@ -845,7 +848,7 @@ class Dnd2024Runtime:
         elif rest == "long":
             if hit_die_rolls:
                 raise ValueError("hit_die_rolls are only valid for a short rest")
-            if attunement:
+            if attunement is not None:
                 raise ValueError("attunement changes are only valid during a short rest")
             result = engine.complete_long_rest(character)
         else:
@@ -1538,21 +1541,25 @@ class Dnd2024Runtime:
         path, where the packages legitimately are the source of truth.
         """
 
-        derived = canonical.get("derived") or {}
+        derived = canonical.get("derived")
+        derived = derived if isinstance(derived, Mapping) else {}
+        raw_slots = derived.get("attunement_slots", 3)
+        try:
+            capacity = int(raw_slots) if raw_slots is not None else 3
+        except (TypeError, ValueError):
+            capacity = 3
+        # 同调镜像必须随投影一起前进，否则重复投影会因缺段而多记一次 reconcile。
+        # refs 一律走 owning module 的唯一读取入口，畸形段降级为空集而不是抛错。
+        attunement = attunement_state_for_projection(canonical, capacity)
+        pending = derived.get("attunement_pending")
+        attunement["pending"] = (
+            sorted(str(ref) for ref in pending) if isinstance(pending, list) else []
+        )
         projected = {
             **Dnd2024CharacterBuilder(bundle).project_legacy(canonical),
             "rule_binding": deepcopy(canonical["rule_binding"]),
             "ruleset_character": canonical,
-            # 同调镜像必须随投影一起前进，否则重复投影会因缺段而多记一次 reconcile。
-            "attunement": {
-                "refs": sorted(
-                    str(ref) for ref in (
-                        (canonical.get("attunement") or {}).get("refs") or []
-                    )
-                ),
-                "capacity": int(derived.get("attunement_slots", 3) or 3),
-                "pending": sorted(derived.get("attunement_pending") or []),
-            },
+            "attunement": attunement,
         }
         merged = merge_live_character_projection(current, projected)
         # 带上既有的 revision / operation log，让随后的 reconcile 是在真实历史上
