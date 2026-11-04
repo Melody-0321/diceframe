@@ -22,6 +22,11 @@ from src.rulesets.dnd2024.character.reconciliation import (
     Dnd2024CharacterStateReconciler,
 )
 from src.rulesets.dnd2024.combat import Dnd2024CombatEngine
+from src.rulesets.dnd2024.combat.action_adapter import (
+    attack_damage_node,
+    maximize_dice_nodes,
+    roll_damage_node,
+)
 from src.rulesets.dnd2024.combat.catalog import (
     DICE_RE,
     FLAT_DAMAGE_RE,
@@ -300,6 +305,56 @@ def test_two_handed_critical_doubles_the_swapped_dice(runtime) -> None:
 
     assert crit["critical"] is True
     assert crit["rolls"] == [10, 10]
+
+
+def test_two_handed_die_feeds_the_maximize_pipeline(catalog) -> None:
+    """S-P2：骰式切换后，最大化作用于双手骰而不是单手骰。"""
+
+    weapon = catalog.weapons["longsword"]
+    one_handed = attack_damage_node(
+        damage_formula=weapon["damage"], modifier=0, critical=False,
+    )
+    two_handed = attack_damage_node(
+        damage_formula=weapon["damage_two_handed"], modifier=0, critical=False,
+    )
+
+    # 最大化不消耗 RNG（空 RNG 足证），结果只可能是对应骰面。
+    assert roll_damage_node(maximize_dice_nodes(one_handed), SequenceRng([])) == (8, [])
+    assert roll_damage_node(maximize_dice_nodes(two_handed), SequenceRng([])) == (10, [])
+
+    # 重击先翻倍、最大化后：2d10 → 20，而不是单手 2d8 → 16。
+    crit_two_handed = attack_damage_node(
+        damage_formula=weapon["damage_two_handed"], modifier=0, critical=True,
+    )
+    assert roll_damage_node(maximize_dice_nodes(crit_two_handed), SequenceRng([])) == (20, [])
+
+
+def test_two_handed_attack_keeps_the_conditional_check_bonus(runtime) -> None:
+    """S-P10：祝福的 d4 加值仍作用于双手攻击检定，伤害仍用双手骰。"""
+
+    engine, instance = _combat_instance(
+        runtime, [{"name": "Longsword", "type": "weapon", "slot": "main_hand",
+                   "item_ref": "item:longsword"}],
+    )
+    conditions = instance.get_character_sheet("gm")["ruleset_character"].setdefault(
+        "conditions", {},
+    )
+    conditions["blessed"] = {"source": "test"}
+
+    resolved = _attack(
+        engine, instance, "blessed-two-handed", SequenceRng([15, 3, 10]), two_handed=True,
+    )
+
+    assert resolved["ok"] is True, resolved
+    check = next(
+        event for event in resolved["event_batch"]["events"]
+        if event.get("type") == "check.resolved" and event.get("kind") == "attack"
+    )
+    assert check["check_bonus"] == 3
+    assert check["check_bonus_rolls"] == [
+        {"condition": "blessed", "die": 4, "roll": 3},
+    ]
+    assert _damage_event(resolved)["rolls"] == [10]
 
 
 @pytest.mark.parametrize("extra", [
