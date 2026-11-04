@@ -204,6 +204,20 @@ def test_capacity_is_base_three_plus_declared_feature_bonus_and_fails_closed() -
         )
 
 
+def test_unbinding_is_allowed_even_when_existing_refs_exceed_capacity() -> None:
+    runtime, sheet = _runtime()
+    refs = [_install_item(runtime, f"legacy_slot_{index}") for index in range(5)]
+    _set_equipment(sheet, refs)
+    sheet["ruleset_character"]["attunement"] = {"refs": refs}
+
+    result = runtime.complete_rest(
+        None, sheet, "short", {}, attunement={"unattune": refs[0]},
+    )
+
+    assert [event["type"] for event in result["events"]] == ["unattune_item"]
+    assert attuned_refs(result["character"]["ruleset_character"]) == set(refs[1:])
+
+
 def test_two_copies_of_one_ref_reject_binding_and_unbinding() -> None:
     runtime, sheet = _runtime()
     ref = _install_item(runtime, "duplicated_amulet")

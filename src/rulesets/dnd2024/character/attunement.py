@@ -327,7 +327,9 @@ def apply_short_rest_attunement(
     if attune:
         remaining.add(attune)
         events.append({"type": "attune_item", "item_ref": attune})
-    if len(remaining) > capacity:
+    # 解绑永远允许（即使旧档/特性变化已让现有数量超容量）；只有新增绑定
+    # 才需要满足容量。这样失配的旧档可以逐步收敛回合法状态。
+    if attune and len(remaining) > capacity:
         raise AttunementError(
             f"attunement capacity {capacity} would be exceeded"
         )
