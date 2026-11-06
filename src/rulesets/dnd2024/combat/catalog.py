@@ -9,10 +9,25 @@ from typing import Any
 
 from src.rulesets.bundle import LoadedRulesetBundle
 
+from ..items.activation import validate_item_declarations
+
 
 DICE_RE = re.compile(r"^[1-9]\d*d(?:4|6|8|10|12|20)(?:\+[1-9]\d*)?$")
 # 固定伤害（例如徒手打击的 1 点基础伤害）：没有骰子，因此重击不翻倍。
 FLAT_DAMAGE_RE = re.compile(r"^[1-9]\d{0,3}$")
+_DICE_PARTS_RE = re.compile(r"^([1-9]\d*)d(4|6|8|10|12|20)(?:\+([1-9]\d*))?$")
+
+
+def _dice_average(formula: str) -> float:
+    """Expected value of one dice formula, used only for data-shape checks."""
+
+    match = _DICE_PARTS_RE.fullmatch(formula)
+    if match is None:
+        return 0.0
+    count, sides, bonus = match.groups()
+    return int(count) * (int(sides) + 1) / 2 + int(bonus or 0)
+
+
 SPELL_MODES = frozenset({
     "spell_attack", "saving_throw", "healing", "automatic_damage", "buff", "debuff", "triggered_damage",
     "stabilize", "reaction_defense", "temp_hp", "teleport", "dispel", "revive",
@@ -22,6 +37,9 @@ DAMAGE_TYPES = frozenset({
     "thunder", "poison", "psychic", "force", "necrotic", "radiant",
 })
 SAVE_ABILITIES = frozenset({"str", "dex", "con", "int", "wis", "cha"})
+# check_bonus_dice 使用规则语言的语义检定类别，而不是事件 kind 值。
+CHECK_BONUS_KINDS = frozenset({"attack", "saving_throw", "ability_check"})
+CHECK_BONUS_DIE_SIDES = frozenset({4, 6, 8, 10, 12, 20})
 
 
 class CombatCatalogError(ValueError):
@@ -42,7 +60,9 @@ class Dnd2024CombatCatalog:
     labels: dict[str, str] = field(default_factory=dict)
 
     @classmethod
-    def from_bundle(cls, bundle: LoadedRulesetBundle) -> Dnd2024CombatCatalog:
+    def from_bundle(
+        cls, bundle: LoadedRulesetBundle, *, validate_items: bool = True,
+    ) -> Dnd2024CombatCatalog:
         raw = bundle.get("combat_catalog", "srd_combat_core")
         if raw is None:
             raise CombatCatalogError("D&D 2024 combat catalog is missing")
@@ -50,14 +70,55 @@ class Dnd2024CombatCatalog:
         effects = raw.get("spell_effects")
         if not isinstance(weapons, dict) or not isinstance(effects, dict):
             raise CombatCatalogError("combat weapons and spell effects must be objects")
-        item_ids = {str(item["id"]) for item in bundle.list("item")}
+        items = {
+            str(item["id"]): item for item in bundle.list("item") if isinstance(item, dict)
+        }
+        if validate_items:
+            try:
+                validate_item_declarations(bundle)
+            except ValueError as exc:
+                raise CombatCatalogError(str(exc)) from None
         for weapon_id, weapon in weapons.items():
-            if weapon_id not in item_ids or not isinstance(weapon, dict):
+            if weapon_id not in items or not isinstance(weapon, dict):
                 raise CombatCatalogError(f"combat weapon is not a bundled item: {weapon_id}")
-            if not DICE_RE.fullmatch(str(weapon.get("damage") or "")):
+            damage = str(weapon.get("damage") or "")
+            if not (DICE_RE.fullmatch(damage) or FLAT_DAMAGE_RE.fullmatch(damage)):
+                # SRD 的吹箭筒只造成固定 1 点伤害；固定伤害与徒手打击同源，
+                # 走同一套"没有骰子、重击不翻倍"的结算，不是特例分支。
                 raise CombatCatalogError(f"combat weapon damage is invalid: {weapon_id}")
             if not 5 <= int(weapon.get("range", 0) or 0) <= 600:
                 raise CombatCatalogError(f"combat weapon range is invalid: {weapon_id}")
+            if "damage_two_handed" in weapon:
+                two_handed = weapon["damage_two_handed"]
+                if not isinstance(two_handed, str) or not DICE_RE.fullmatch(two_handed):
+                    raise CombatCatalogError(
+                        f"combat weapon two-handed damage is invalid: {weapon_id}"
+                    )
+                # 两用是"换取更大骰子"的声明：固定伤害或远程武器携带该字段，
+                # 以及双手骰并不优于单手骰，都是数据错误而不是可选写法。
+                if DICE_RE.fullmatch(damage) is None or bool(weapon.get("ranged")):
+                    raise CombatCatalogError(
+                        f"weapon cannot declare two-handed damage: {weapon_id}"
+                    )
+                if _dice_average(two_handed) <= _dice_average(damage):
+                    raise CombatCatalogError(
+                        f"two-handed damage does not exceed one-handed: {weapon_id}"
+                    )
+            if "ammunition_item_ref" in weapon:
+                ammo_ref = weapon["ammunition_item_ref"]
+                if not isinstance(ammo_ref, str) or not ammo_ref.startswith("item:"):
+                    raise CombatCatalogError(
+                        f"combat weapon ammunition ref is invalid: {weapon_id}"
+                    )
+                if not bool(weapon.get("ranged")):
+                    raise CombatCatalogError(
+                        f"only ranged weapons consume ammunition: {weapon_id}"
+                    )
+                ammo = items.get(ammo_ref.removeprefix("item:"))
+                if not isinstance(ammo, dict) or ammo.get("item_type") != "ammunition":
+                    raise CombatCatalogError(
+                        f"combat weapon ammunition is not a bundled ammunition item: {weapon_id}"
+                    )
         spell_catalog = bundle.get("spell_catalog", "srd_spells") or {}
         spell_ids = {
             str(item.get("id") or "") for item in spell_catalog.get("spells", [])
@@ -191,7 +252,7 @@ class Dnd2024CombatCatalog:
             if set(entry) - {
                 "attack_modes", "resist_damage_types", "implies_incapacitated",
                 "speed_zero", "auto_fail_saves", "crit_on_hit_within_5",
-                "speed_modifier",
+                "speed_modifier", "check_bonus_dice",
             }:
                 raise CombatCatalogError(
                     f"combat condition has unknown fields: {condition_id}"
@@ -236,11 +297,36 @@ class Dnd2024CombatCatalog:
                     f"combat condition resist types are invalid: {condition_id}"
                 )
             modes = entry.get("attack_modes")
-            # A condition may declare resistance or a passive flag only; if it
-            # declares neither mechanics nor attack modes the entry is still
-            # rejected, matching the P1 rule that every entry states something.
+            bonus_dice = entry.get("check_bonus_dice")
+            if bonus_dice is not None and (
+                not isinstance(bonus_dice, list)
+                or not bonus_dice
+                or any(
+                    not isinstance(declaration, dict)
+                    or set(declaration) != {"die", "kinds"}
+                    or isinstance(declaration.get("die"), bool)
+                    or not isinstance(declaration.get("die"), int)
+                    or declaration.get("die") not in CHECK_BONUS_DIE_SIDES
+                    or not isinstance(declaration.get("kinds"), list)
+                    or not declaration.get("kinds")
+                    or any(
+                        not isinstance(kind, str) or kind not in CHECK_BONUS_KINDS
+                        for kind in declaration["kinds"]
+                    )
+                    or len(set(declaration["kinds"])) != len(declaration["kinds"])
+                    for declaration in bonus_dice
+                )
+            ):
+                raise CombatCatalogError(
+                    f"combat condition bonus dice are invalid: {condition_id}"
+                )
+            # A condition may declare resistance, a passive flag, or bonus
+            # dice only; if it declares no mechanics and no attack modes the
+            # entry is still rejected, matching the P1 rule that every entry
+            # states something.
             if modes is None and (
                 resist_types is not None
+                or bonus_dice is not None
                 or any(
                     key in entry for key in (
                         "implies_incapacitated", "speed_zero",

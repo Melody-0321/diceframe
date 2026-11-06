@@ -64,6 +64,19 @@ def formula_node_from_dice_formula(formula: str) -> dict[str, Any]:
     return node
 
 
+def average_damage(formula: str, *, flat_bonus: float = 0.0) -> float:
+    """Expected value of a catalog damage formula plus a flat modifier."""
+
+    text = str(formula or "")
+    if _FLAT_DAMAGE_RE.fullmatch(text):
+        return float(text) + flat_bonus
+    match = DICE_RE.fullmatch(text)
+    if match is None:
+        return 0.0
+    count, sides, bonus = int(match.group(1)), int(match.group(2)), int(match.group(3) or 0)
+    return count * (sides + 1) / 2 + bonus + flat_bonus
+
+
 def double_dice_counts(node: Mapping[str, Any]) -> dict[str, Any]:
     """重击语义：把 AST 中每个骰节点的骰数翻倍（D&D 专属规则留在本层）。"""
 
@@ -80,6 +93,31 @@ def double_dice_counts(node: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(args, list):
             walked["args"] = [
                 double_dice_counts(arg) if isinstance(arg, dict) else arg
+                for arg in args
+            ]
+        return walked
+    return walked
+
+
+def maximize_dice_nodes(node: Mapping[str, Any]) -> dict[str, Any]:
+    """骰面最大化（Supreme Healing / Overchannel）：每个骰节点 → 常量节点。
+
+    D&D 侧 AST 变换，与 double_dice_counts 同构：RNG 零消耗、骰迹为空。
+    调用方约定：先 crit 翻倍、后最大化（数学等价，锁死顺序）。
+    """
+
+    if not isinstance(node, dict):
+        raise CombatIntentError("formula node must be an object")
+    walked = deepcopy(node)
+    op = walked.get("op")
+    if op == "dice":
+        count, sides = _parse_ndm(str(walked.get("formula") or ""))
+        return {"op": "constant", "value": count * sides}
+    if op in {"add", "subtract", "multiply", "min", "max"}:
+        args = walked.get("args")
+        if isinstance(args, list):
+            walked["args"] = [
+                maximize_dice_nodes(arg) if isinstance(arg, dict) else arg
                 for arg in args
             ]
         return walked
@@ -177,6 +215,7 @@ __all__ = [
     "double_dice_counts",
     "formula_node_from_dice_formula",
     "heal_ability_modifier_node",
+    "maximize_dice_nodes",
     "roll_damage_node",
     "spell_formula_node",
 ]

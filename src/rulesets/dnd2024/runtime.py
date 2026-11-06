@@ -24,6 +24,7 @@ from src.adventures.graph_v2 import (
 from src.engine import progression
 from src.engine.legacy_game_projection import project_legacy_game_context
 from src.engine.modules import adventure_runtime_state, legacy_combat, ruleset_runtime
+from src.engine.staged_transaction import fork_domain_state
 from src.rulesets.dnd2024.adventure_migrations import (
     apply_unreleased_adventure_binding_migration,
 )
@@ -31,6 +32,7 @@ from src.rulesets.bundle import LoadedRulesetBundle, RulesetBundleLoader
 from src.rulesets.contracts import RulesetCapabilities
 import src.rulesets.dnd2024.advancement_access as advancement_access
 from src.rulesets.dnd2024.binding import rule_binding
+from src.rulesets.dnd2024.character.attunement import attunement_state_for_projection
 from src.rulesets.dnd2024.character.builder import Dnd2024CharacterBuilder
 from src.rulesets.dnd2024.character.reconciliation import (
     Dnd2024CharacterStateReconciler,
@@ -75,6 +77,31 @@ from src.rulesets.dnd2024 import adventure_validation  # noqa: F401  (MOD-01: �
 logger = logging.getLogger(__name__)
 
 
+def _normalize_legacy_check_bonus(event: dict[str, Any]) -> dict[str, Any]:
+    """Map pre-1C ``bless_bonus`` evidence onto the current public contract.
+
+    Baseline check events stored the single Bless d4 as an integer
+    ``bless_bonus`` and already folded it into ``total``, with no roll trace.
+    Current consumers read ``check_bonus``.  Normalizing here -- in the
+    presentation projection, not the persisted ledger -- keeps old saves
+    readable without rewriting history.  Only the already-known bonus is
+    mapped; the absent d4 trace is not fabricated.  A zero or absent bonus is
+    returned unchanged, and an event that already carries ``check_bonus`` wins.
+    """
+
+    if "check_bonus" in event or "bless_bonus" not in event:
+        return event
+    try:
+        bonus = int(event.get("bless_bonus") or 0)
+    except (TypeError, ValueError):
+        return event
+    if bonus <= 0:
+        return event
+    normalized = dict(event)
+    normalized["check_bonus"] = bonus
+    return normalized
+
+
 class Dnd2024Runtime:
     def scene_objective_context(self, instance: Any, *, viewer_is_gm: bool) -> dict[str, Any]:
         from src.engine.staged_transaction import fork_domain_state
@@ -99,6 +126,9 @@ class Dnd2024Runtime:
 
     runtime_id = "core:dnd2024"
     runtime_version = 1
+    # 显式 rest option 契约：generic rest service 只转发这里声明的请求字段；
+    # 未声明该能力的 ruleset 不会收到 D&D 专属的 attunement 参数。
+    rest_option_names = frozenset({"attunement"})
     capabilities = RulesetCapabilities(
         experience_profile="dnd2024",
         character_builder="professional",
@@ -398,6 +428,11 @@ class Dnd2024Runtime:
             raise ValueError(
                 f"bundle runtime {bundle.manifest.runtime_id} does not match {self.runtime_id}"
             )
+        from .items.activation import validate_item_declarations
+        from .treasure import validate_treasure_tables
+
+        validate_item_declarations(bundle)
+        validate_treasure_tables(bundle)
         self._bundle_cache[cache_key] = bundle
         return bundle
 
@@ -423,10 +458,11 @@ class Dnd2024Runtime:
     ) -> dict[str, Any]:
         """Strip monster stat blocks from intent/automation payloads for non-GMs."""
 
-        del instance, viewer_id
         if viewer_is_gm:
             return result
-        return combat_visibility.public_intent_result(result)
+        return combat_visibility.public_intent_result(
+            result, viewer_id=viewer_id, viewer_is_gm=False,
+        )
 
     def configure_live_advancement(
         self, instance: Any, mode: str, authority: str,
@@ -487,7 +523,9 @@ class Dnd2024Runtime:
         )
 
     def _exploration_engine(self, locale: str = "") -> Dnd2024ExplorationEngine:
-        return Dnd2024ExplorationEngine(self.load_bundle(locale), locale=locale)
+        return Dnd2024ExplorationEngine(
+            self.load_bundle(locale), locale=locale, bundle_validated=True,
+        )
 
     def _combat_engine(
         self,
@@ -517,14 +555,19 @@ class Dnd2024Runtime:
             if adventure is not None
             else ""
         )
+        bundle = self.load_bundle(locale)
         if access is None:
             return Dnd2024CombatEngine(
-                self.load_bundle(locale), encounter_catalog=catalog,
+                bundle, encounter_catalog=catalog,
                 content_catalog=content_catalog, content_source=content_source,
+                bundle_validated=True, locale_loader=self.load_bundle,
+                supported_locales=tuple(bundle.manifest.supported_locales),
             )
         return Dnd2024CombatEngine(
-            self.load_bundle(locale), access, catalog,
+            bundle, access, catalog,
             content_catalog=content_catalog, content_source=content_source,
+            bundle_validated=True, locale_loader=self.load_bundle,
+            supported_locales=tuple(bundle.manifest.supported_locales),
         )
 
     def _encounter_access(
@@ -800,22 +843,57 @@ class Dnd2024Runtime:
     def complete_rest(
         self, rule: Any, character: dict[str, Any], rest: str,
         hit_die_rolls: dict[str, list[int]] | None = None,
+        attunement: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         del rule
         canonical = character.get("ruleset_character")
         locale = str(canonical.get("locale") or "") if isinstance(canonical, dict) else ""
         bundle = self.load_bundle(locale)
+        if attunement is not None and not isinstance(attunement, dict):
+            # 同调 payload 是明确的窄契约：非对象直接拒绝，不做猜测式解构。
+            raise ValueError("attunement must be an object")
         engine = Dnd2024RestEngine(bundle)
         if rest == "short":
-            result = engine.complete_short_rest(character, hit_die_rolls)
+            result = engine.complete_short_rest(
+                character, hit_die_rolls, attunement=attunement,
+            )
         elif rest == "long":
             if hit_die_rolls:
                 raise ValueError("hit_die_rolls are only valid for a short rest")
+            if attunement is not None:
+                raise ValueError("attunement changes are only valid during a short rest")
             result = engine.complete_long_rest(character)
         else:
             raise ValueError("rest must be short or long")
         result["character"] = self._live_projection(character, result["character"], bundle)
         return result
+
+    def validate_rest_options(
+        self, instance: Any, actor_id: str, rest: str,
+        options: dict[str, Any] | None,
+    ) -> None:
+        """Early, non-mutating validation of capability-rest payloads.
+
+        The generic rest service only forwards options the runtime declares, so
+        this stays a D&D capability rather than a branch in the generic path.
+        """
+
+        if not isinstance(options, dict) or "attunement" not in options:
+            return
+        if rest != "short":
+            raise ValueError("attunement changes are only valid during a short rest")
+        uid = str(actor_id).removeprefix("player:")
+        if uid not in instance.players:
+            return
+        character = instance.get_character_sheet(uid)
+        canonical = character.get("ruleset_character")
+        if not isinstance(canonical, dict):
+            raise ValueError("character is missing ruleset_character")
+        locale = str(canonical.get("locale") or "")
+        bundle = self.load_bundle(locale)
+        Dnd2024RestEngine(bundle).validate_attunement(
+            canonical, character, options["attunement"],
+        )
 
     @staticmethod
     def validate_rest_context(instance: Any, actor_id: str, rest: str) -> None:
@@ -941,7 +1019,14 @@ class Dnd2024Runtime:
 
     def apply_narrative_hp_delta(self, instance: Any, user_id: str, delta: int) -> int:
         from .narrative_health import settle_narrative_hp
-        engine = Dnd2024CombatEngine(self.load_bundle(str(instance.language or "en")))
+        bundle = self.load_bundle(str(instance.language or "en"))
+        # 叙事伤害会走到同一个 apply_batch，致死时也要重算角色状态。少了语言包
+        # 索引，非英文装备行在该路径上解析不出身份，会被移出 canonical 并落盘。
+        engine = Dnd2024CombatEngine(
+            bundle, bundle_validated=True,
+            locale_loader=self.load_bundle,
+            supported_locales=tuple(bundle.manifest.supported_locales),
+        )
         return settle_narrative_hp(engine, instance, user_id, delta)
 
     @staticmethod
@@ -986,13 +1071,28 @@ class Dnd2024Runtime:
     def apply_event_batch(
         self, instance: Any, batch: dict[str, Any],
     ) -> dict[str, Any]:
-
-
         # Campaign steps write the scene after the batch commits; reject an
-        # unsupported notes slot before any ruleset state changes.
+        # unsupported notes slot before loading content or changing ruleset state.
         module_hooks.preflight(instance, module_hooks.NARRATIVE_VIEW)
         locale = str(getattr(instance, "language", "") or "")
         bundle = self.load_bundle(locale)
+        if str(batch.get("intent_type") or "") == "combat.start":
+            # The legacy armor repair is part of the combat.start transaction.
+            # Stage it before resolving the combat batch so a stale or malformed
+            # batch cannot leave character revisions/log entries behind.
+            staged = fork_domain_state(instance)
+            self._reconcile_party_before_combat(staged, bundle)
+            result = self._apply_event_batch_in_place(staged, batch, locale)
+            if result.get("applied"):
+                instance.replace_persisted_state_from(staged)
+            return result
+        return self._apply_event_batch_in_place(instance, batch, locale)
+
+    def _apply_event_batch_in_place(
+        self, instance: Any, batch: dict[str, Any], locale: str,
+    ) -> dict[str, Any]:
+        """Apply one batch to an already selected aggregate transaction."""
+
         before_characters = {
             uid: deepcopy(instance.get_character_sheet(uid).get("ruleset_character"))
             for uid in getattr(instance, "players", {})
@@ -1053,7 +1153,9 @@ class Dnd2024Runtime:
         )
         access = self._encounter_access(instance, campaign)
         combat_engine = self._combat_engine(instance, access, locale)
-        view = combat_engine.gameplay_view(instance)
+        view = combat_engine.gameplay_view(
+            instance, viewer_id=viewer_id, viewer_is_gm=viewer_is_gm,
+        )
         request = ruleset_runtime.state(instance).get("encounter_request")
         if isinstance(request, dict):
             projected_request = deepcopy(request)
@@ -1118,15 +1220,17 @@ class Dnd2024Runtime:
             "dnd2024.position.changed", "dnd2024.spell.cast",
             "check.resolved", "resource.changed", "condition.applied",
             "condition.removed", "dnd2024.death_save.resolved",
-            "dnd2024.character.revived",
+            "dnd2024.character.revived", "attune_item", "unattune_item",
         }
         allowed_fields = {
             "type", "kind", "actor_id", "target_id", "text", "natural", "modifier",
             "total", "target", "success", "critical", "delta", "amount", "damage_type",
             "healing",
-            "rolls", "advantage_mode", "advantage_sources", "bless_bonus",
+            "rolls", "advantage_mode", "advantage_sources", "check_bonus",
+            "check_bonus_rolls",
             "distance", "round", "turn_index", "previous_actor_id", "condition", "reason",
             "spell_ref", "resource", "roll", "successes", "failures", "stable", "dead", "hp",
+            "item_ref",
         }
         combat = (
             ruleset_runtime.state(instance).get("combat")
@@ -1160,7 +1264,9 @@ class Dnd2024Runtime:
                 if not isinstance(raw, dict) or str(raw.get("type") or "") not in meaningful:
                     continue
                 event = {
-                    key: deepcopy(value) for key, value in raw.items() if key in allowed_fields
+                    key: deepcopy(value)
+                    for key, value in _normalize_legacy_check_bonus(raw).items()
+                    if key in allowed_fields
                 }
                 if event.get("round") is not None:
                     current_round = int(event.get("round", 0) or 0)
@@ -1462,10 +1568,25 @@ class Dnd2024Runtime:
         path, where the packages legitimately are the source of truth.
         """
 
+        derived = canonical.get("derived")
+        derived = derived if isinstance(derived, Mapping) else {}
+        raw_slots = derived.get("attunement_slots", 3)
+        try:
+            capacity = int(raw_slots) if raw_slots is not None else 3
+        except (TypeError, ValueError):
+            capacity = 3
+        # 同调镜像必须随投影一起前进，否则重复投影会因缺段而多记一次 reconcile。
+        # refs 一律走 owning module 的唯一读取入口，畸形段降级为空集而不是抛错。
+        attunement = attunement_state_for_projection(canonical, capacity)
+        pending = derived.get("attunement_pending")
+        attunement["pending"] = (
+            sorted(str(ref) for ref in pending) if isinstance(pending, list) else []
+        )
         projected = {
             **Dnd2024CharacterBuilder(bundle).project_legacy(canonical),
             "rule_binding": deepcopy(canonical["rule_binding"]),
             "ruleset_character": canonical,
+            "attunement": attunement,
         }
         merged = merge_live_character_projection(current, projected)
         # 带上既有的 revision / operation log，让随后的 reconcile 是在真实历史上
@@ -1479,6 +1600,39 @@ class Dnd2024Runtime:
             merged, frozenset({"equipment", "inventory"}),
         )
         return merged
+
+    def _reconcile_party_before_combat(self, instance: Any, bundle: Any) -> None:
+        """Repair pre-Armor-Training party records before combat becomes active.
+
+        Idempotent: a current record derives the same values and is not
+        rewritten, so repeated load/combat.start never adds revisions or log
+        entries twice.  A player without a live equipment list is derived from
+        canonical refs instead: projecting an empty list would erase them.
+        """
+
+        reconciler = self._reconciler(bundle)
+        for uid in sorted(getattr(instance, "players", {}) or {}):
+            sheet = instance.get_character_sheet(uid)
+            if not isinstance(sheet, dict) or not isinstance(sheet.get("ruleset_character"), dict):
+                continue
+            if isinstance(sheet.get("equipment"), list):
+                changed = reconciler.reconcile(sheet, frozenset({"equipment"}))
+            else:
+                changed = reconciler.reconcile_canonical(sheet["ruleset_character"])
+            if changed is not None:
+                instance.set_character_sheet(uid, sheet)
+
+        state = ruleset_runtime.state(instance)
+        party = state.get("party") if isinstance(state, dict) else None
+        companions = party.get("companions") if isinstance(party, dict) else None
+        if not isinstance(companions, dict):
+            return
+        for companion in companions.values():
+            if not isinstance(companion, dict) or not companion.get("active", True):
+                continue
+            canonical = companion.get("ruleset_character")
+            if isinstance(canonical, dict):
+                reconciler.reconcile_canonical(canonical)
 
     def reconcile_character_state(
         self,

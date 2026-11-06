@@ -65,6 +65,8 @@ def _draft(runtime: Dnd2024Runtime, class_ref: str = "class:fighter") -> dict:
         "background_equipment_package_ref": choices["background_equipment_packages"][0]["ref"],
         "language_refs": ["language:common", "language:dwarvish", "language:elvish"],
     }
+    if "fighting_style" in (class_entity.get("level_1_feature_ids") or []):
+        draft["class_feature_feat_choices"] = {"fighting_style": "feat:defense"}
     if class_entity.get("recommended_spell_choices"):
         draft["class_spell_choices"] = class_entity["recommended_spell_choices"]
     choices = runtime.builder_choices(None, draft)
@@ -318,7 +320,7 @@ def test_unarmored_armor_class_follows_the_bundle_formula(runtime) -> None:
 
     dex = int(game.canonical["abilities"]["dex"])
     assert game.armor_class == derive_armor_class(
-        {"dex": dex}, [], runtime.load_bundle("en"),
+        {"dex": dex}, [], runtime.load_bundle("en"), armor_category_refs=[],
     )
 
 
@@ -502,6 +504,31 @@ def test_localized_names_all_resolve_to_one_canonical_item(runtime, display_name
     assert reconciler._resolve_item_id({"name": display_name}) == "chain_mail"
 
 
+def test_narrative_death_recompute_keeps_a_localized_item_identity(runtime) -> None:
+    """叙事伤害致死也走 apply_batch 的死亡重算，必须带全部语言的名称索引。"""
+
+    game = _Game(runtime)
+    assert game.instance.bind_ruleset_runtime(
+        game.sheet["ruleset_character"]["rule_binding"],
+    )
+    game.strip()
+    game.sheet["equipment"].append(
+        {"name": "锁子甲", "type": "armor", "slot": "body", "qty": 1},
+    )
+    assert "item:chain_mail" not in (
+        (game.canonical.get("equipment") or {}).get("item_refs") or []
+    )
+
+    # 归零只到昏迷，之后每次受击才累计死亡豁免；要打到 dead 才会触发重算。
+    for _ in range(4):
+        runtime.apply_narrative_hp_delta(game.instance, "p1", -999)
+
+    row = next(item for item in game.sheet["equipment"] if item["name"] == "锁子甲")
+    assert "dead" in (game.canonical.get("conditions") or {})
+    assert row.get("item_ref") == "item:chain_mail"
+    assert "item:chain_mail" in game.canonical["equipment"]["item_refs"]
+
+
 def test_reconciliation_writes_canonical_identity_back_to_live_rows(runtime) -> None:
     """§42：解析成功后补齐 canonical ref，之后不再依赖本地化名称。"""
 
@@ -594,6 +621,9 @@ def test_creation_and_reconciliation_share_one_armor_class_formula(runtime) -> N
 
     assert game.armor_class == derive_armor_class(
         game.canonical["abilities"], game.item_refs, bundle,
+        armor_category_refs=list(
+            game.canonical["proficiencies"]["armor_category_refs"]
+        ),
     )
 
 

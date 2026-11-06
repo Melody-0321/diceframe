@@ -71,6 +71,11 @@ const selectedSpellTargetCount = ref(1)
 const selectedResistType = ref('')
 const teleportDistance = ref<number | string>('')
 const movementDistance = ref(5)
+const declareAttackLuck = ref(false)
+const declareTwoHanded = ref(false)
+const declareSpellLuck = ref(false)
+const declareMaximize = ref(false)
+const declareDeathSaveLuck = ref(false)
 const staged = ref<JsonObject | null>(null)
 const confirmCard = ref<HTMLElement | null>(null)
 let pollTimer: number | undefined
@@ -127,6 +132,29 @@ const explorationSpell = computed(() => (
 const explorationSlotValid = computed(() => Boolean(
   explorationSpell.value
   && explorationSpell.value.available_slot_levels.includes(explorationSlot.value)
+))
+const itemAction = computed(() => action('activate_item'))
+const explorationItemAction = computed(() => action('exploration.activate_item'))
+// D4：服务端只向 GM 投影 exploration.roll_treasure；前端只提交表引用，
+// 骰值、嵌套层级与结果全部由服务端事件返回。
+const treasureAction = computed(() => action('exploration.roll_treasure'))
+const treasureTables = computed(() => treasureAction.value?.tables || [])
+const treasureTableRef = ref('')
+const treasureResult = ref('')
+const selectedItemRef = ref('')
+const selectedItemTargetId = ref('')
+const explorationItemRef = ref('')
+const itemChoices = computed(() => {
+  if (dockTab.value !== 'action' && dockTab.value !== 'bonus') return []
+  return (itemAction.value?.items || []).filter(item => (
+    dockTab.value === 'bonus' ? item.cost === 'bonus_action' : item.cost === 'action'
+  ))
+})
+const selectedItem = computed(() => (itemAction.value?.items || []).find(
+  item => item.item_ref === selectedItemRef.value,
+))
+const explorationItem = computed(() => (explorationItemAction.value?.items || []).find(
+  item => item.item_ref === explorationItemRef.value,
 ))
 const moveAction = computed(() => action('move'))
 const pendingDecision = computed(() => (
@@ -208,6 +236,13 @@ const stagedSummary = computed(() => {
     return `${copy.value.attack} · ${weapon?.name || weapon?.id || ref} → ${target}`
   }
   if (type === 'cast_spell') return `${copy.value.cast} · ${selectedSpell.value?.name || payload.spell_ref} → ${target}`
+  if (type === 'activate_item' || type === 'exploration.activate_item') {
+    const item = (itemAction.value?.items || explorationItemAction.value?.items || []).find(
+      entry => entry.item_ref === payload.item_ref,
+    )
+    const aimed = payload.target_id ? ` → ${target}` : ''
+    return `${copy.value.activateItem} · ${item?.name || payload.item_ref}${aimed}`
+  }
   if (type === 'move') return `${copy.value.move} · ${Number(payload.distance || 0)} ${copy.value.feet}`
   if (type === 'class_capability') {
     const capability = capabilityActions.value.find(
@@ -254,7 +289,7 @@ const { floaters, play: playFeedback, clear: clearFeedback } = useFeedback(() =>
   condition: localizedTerm,
 }))
 
-type DockMode = '' | 'attack' | 'spell' | 'capability' | 'explore' | 'move'
+type DockMode = '' | 'attack' | 'spell' | 'item' | 'capability' | 'explore' | 'explore_item' | 'move'
 const dockTab = ref<'action' | 'bonus' | 'move' | 'reaction'>('action')
 const dockMode = ref<DockMode>('')
 const inspectedId = ref('')
@@ -273,17 +308,21 @@ const showSpellTile = computed(() => {
   if (dockTab.value !== 'action') return false
   return spellChoices.value.length > 0 || Boolean(spellActor.value?.spells?.length)
 })
+const showItemTile = computed(() => itemChoices.value.length > 0)
 const visibleTileCount = computed(() => {
   if (dockTab.value === 'move') return moveAction.value ? 1 : 0
   if (dockTab.value === 'reaction') return 0
   const spell = showSpellTile.value ? 1 : 0
-  if (dockTab.value === 'bonus') return spell
-  return spell + (attackAction.value ? 1 : 0) + (explorationAction.value ? 1 : 0) + simpleActions.value.length
+  const item = showItemTile.value ? 1 : 0
+  if (dockTab.value === 'bonus') return spell + item
+  return spell + item + (attackAction.value ? 1 : 0) + (explorationAction.value ? 1 : 0)
+    + (explorationItemAction.value ? 1 : 0) + simpleActions.value.length
     + (capabilityActions.value.length || currentClassResources.value.length ? 1 : 0)
 })
-const simpleActions = computed(() => (['dash', 'dodge', 'disengage', 'death_save'] as const).filter(type => action(type)))
+const simpleActions = computed(() => (['dash', 'dodge', 'disengage', 'hide', 'death_save'] as const).filter(type => action(type)))
 const simpleLabel = (type: string) => ({
-  dash: copy.value.dash, dodge: copy.value.dodge, disengage: copy.value.disengage, death_save: copy.value.deathSave,
+  dash: copy.value.dash, dodge: copy.value.dodge, disengage: copy.value.disengage, hide: copy.value.hide,
+  death_save: copy.value.deathSave,
 }[type] || type)
 const battleTokenIds = computed(() => battleTokens.value.map(token => token.id))
 const targetCardLabels = computed(() => ({
@@ -301,7 +340,9 @@ const aimedTargetId = computed(() => {
     case 'attack': return selectedTargetId.value
     case 'spell': return selectedSpellTargets.value[0] || ''
     case 'capability': return selectedCapability.value?.requires_target ? capabilityTargetId.value : ''
+    case 'item': return selectedItem.value?.target === 'ally' ? selectedItemTargetId.value : ''
     case 'explore': return explorationTargetId.value
+    case 'explore_item': return ''
     default: return ''
   }
 })
@@ -347,11 +388,17 @@ const dockCost = computed(() => {
     return spell.trigger_target_id ? copy.value.bonus : localizedTerm(spell.casting_time)
   }
   if (dockMode.value === 'capability') return selectedCapability.value ? capabilityCostLabel(selectedCapability.value) : ''
+  if (dockMode.value === 'item') {
+    if (!selectedItem.value) return ''
+    return selectedItem.value.cost === 'bonus_action' ? copy.value.bonus : copy.value.action
+  }
+  if (dockMode.value === 'explore_item') return ''
   if (dockMode.value === 'move') return `${Math.abs(Number(movementDistance.value || 0))} ${copy.value.feet}`
   return ''
 })
 const dockNeedsTarget = computed(() => dockMode.value === 'attack' || dockMode.value === 'spell'
-  || (dockMode.value === 'capability' && Boolean(selectedCapability.value?.requires_target)))
+  || (dockMode.value === 'capability' && Boolean(selectedCapability.value?.requires_target))
+  || (dockMode.value === 'item' && selectedItem.value?.target === 'ally'))
 const canStageDock = computed(() => {
   if (busy.value) return false
   switch (dockMode.value) {
@@ -361,7 +408,10 @@ const canStageDock = computed(() => {
       && spellChoices.value.some(item => item.spell_ref === selectedSpellRef.value))
     case 'capability': return Boolean(selectedCapability.value
       && (!selectedCapability.value.requires_target || capabilityTargetId.value))
+    case 'item': return Boolean(selectedItem.value
+      && (selectedItem.value.target !== 'ally' || selectedItemTargetId.value))
     case 'explore': return Boolean(explorationSpellRef.value && explorationSlotValid.value)
+    case 'explore_item': return Boolean(explorationItem.value)
     case 'move': return Boolean(movementDistance.value)
     default: return false
   }
@@ -381,14 +431,24 @@ function openDockMode(mode: DockMode, keepOpen = false): void {
   if (dockMode.value === 'explore' && !explorationSpellRef.value) {
     explorationSpellRef.value = explorationAction.value?.spells?.[0]?.spell_ref || ''
   }
+  if (dockMode.value === 'item' && !itemChoices.value.some(
+    item => item.item_ref === selectedItemRef.value,
+  )) {
+    selectedItemRef.value = itemChoices.value[0]?.item_ref || ''
+  }
+  if (dockMode.value === 'explore_item' && !explorationItem.value) {
+    explorationItemRef.value = explorationItemAction.value?.items?.[0]?.item_ref || ''
+  }
 }
 
 function stageDock(): void {
   if (!canStageDock.value) return
   if (dockMode.value === 'attack') stageAttack()
   else if (dockMode.value === 'spell') stageSpell()
+  else if (dockMode.value === 'item') stageItem()
   else if (dockMode.value === 'capability' && selectedCapability.value) stageCapability(selectedCapability.value)
   else if (dockMode.value === 'explore') stageExplorationSpell()
+  else if (dockMode.value === 'explore_item') stageExplorationItem()
   else if (dockMode.value === 'move') stageMove()
 }
 
@@ -423,6 +483,7 @@ function pickBattleTarget(actorId: string): void {
     }
   }
   if (capabilityTargets.value.some(item => item.actor_id === actorId)) capabilityTargetId.value = actorId
+  if (itemAction.value?.targets?.some(item => item.actor_id === actorId)) selectedItemTargetId.value = actorId
   if (explorationAction.value?.targets?.some(item => item.actor_id === actorId)) explorationTargetId.value = actorId
 }
 
@@ -570,6 +631,22 @@ function resetSelections(): void {
   }
   selectedTargetId.value = keepOrFirst(selectedTargetId.value, attackAction.value?.targets || [])
   capabilityTargetId.value = keepOrFirst(capabilityTargetId.value, capabilityTargets.value)
+  selectedItemTargetId.value = keepOrFirst(
+    selectedItemTargetId.value, itemAction.value?.targets || [],
+  )
+  if (!itemChoices.value.some(item => item.item_ref === selectedItemRef.value)) {
+    selectedItemRef.value = itemChoices.value[0]?.item_ref || ''
+  }
+  if (!explorationItemAction.value?.items?.some(
+    item => item.item_ref === explorationItemRef.value,
+  )) {
+    explorationItemRef.value = explorationItemAction.value?.items?.[0]?.item_ref || ''
+  }
+  if (!treasureTables.value.some(
+    table => table.table_ref === treasureTableRef.value,
+  )) {
+    treasureTableRef.value = treasureTables.value[0]?.table_ref || ''
+  }
   chooseUsableWeapon()
   if (!currentActor.value || !canReachPosition(Number(currentActor.value.position || 0) + Number(movementDistance.value || 0))) {
     movementDistance.value = Math.min(5, Number(moveAction.value?.movement_remaining || 5))
@@ -577,6 +654,11 @@ function resetSelections(): void {
   if (!capabilityActions.value.some(item => item.capability_id === selectedCapabilityId.value)) {
     selectedCapabilityId.value = capabilityActions.value[0]?.capability_id || ''
   }
+  declareAttackLuck.value = false
+  declareTwoHanded.value = false
+  declareSpellLuck.value = false
+  declareMaximize.value = false
+  declareDeathSaveLuck.value = false
 }
 
 // Back to a clean dock once an intent lands or the turn passes on.
@@ -599,6 +681,11 @@ function clearGameScopedState(): void {
   notice.value = ''
   selectedWeaponId.value = ''
   selectedSpellRef.value = ''
+  selectedItemRef.value = ''
+  selectedItemTargetId.value = ''
+  explorationItemRef.value = ''
+  treasureTableRef.value = ''
+  treasureResult.value = ''
   selectedSlot.value = 0
   selectedTargetId.value = ''
   selectedSpellTargets.value = ['']
@@ -606,6 +693,11 @@ function clearGameScopedState(): void {
   selectedResistType.value = ''
   teleportDistance.value = ''
   movementDistance.value = 5
+  declareAttackLuck.value = false
+  declareTwoHanded.value = false
+  declareSpellLuck.value = false
+  declareMaximize.value = false
+  declareDeathSaveLuck.value = false
   staged.value = null
   returnFocus = null
 }
@@ -650,6 +742,9 @@ async function submit(payload: JsonObject): Promise<boolean> {
     staged.value = null
     error.value = ''
     notice.value = latestEvents.value.map(describeEvent).filter(Boolean).join(' · ')
+    if (payload.type === 'exploration.roll_treasure') {
+      treasureResult.value = notice.value
+    }
     playFeedback(latestEvents.value)
     resetSelections()
     resetDock()
@@ -682,6 +777,8 @@ function stageAttack(): void {
     type: 'attack', actor_id: attackAction.value.actor_id,
     target_id: selectedTargetId.value,
     ...(weapon.weapon_ref ? { weapon_ref: weapon.weapon_ref } : { attack_id: weapon.id }),
+    ...(declareTwoHanded.value && weapon.damage_two_handed ? { two_handed: true } : {}),
+    ...(declareAttackLuck.value ? { spend_luck: true } : {}),
   })
 }
 
@@ -698,6 +795,8 @@ function stageSpell(): void {
   else payload.target_id = ids[0]
   if (spell.resist_choice?.length) payload.resist_type = selectedResistType.value
   if (spell.mode === 'teleport') payload.teleport_distance = Number(teleportDistance.value)
+  if (declareSpellLuck.value) payload.spend_luck = true
+  if (declareMaximize.value) payload.maximize_damage = true
   stage(payload)
 }
 
@@ -713,6 +812,33 @@ function stageExplorationSpell(): void {
   })
 }
 
+// Item activation only sends the canonical ref; HP, charges and consumption
+// stay authoritative on the server.
+function stageItem(): void {
+  const actionPayload = itemAction.value
+  const item = selectedItem.value
+  if (!actionPayload || !item) return
+  const payload: JsonObject = {
+    type: 'activate_item', actor_id: actionPayload.actor_id, item_ref: item.item_ref,
+  }
+  if (item.target === 'ally') {
+    if (!selectedItemTargetId.value) return
+    payload.target_id = selectedItemTargetId.value
+  }
+  stage(payload)
+}
+
+function stageExplorationItem(): void {
+  const actionPayload = explorationItemAction.value
+  const item = explorationItem.value
+  if (!actionPayload || !item) return
+  stage({
+    type: 'exploration.activate_item',
+    actor_id: String(actionPayload.actor_id || ''),
+    item_ref: item.item_ref,
+  })
+}
+
 function stageMove(): void {
   if (!moveAction.value || !movementDistance.value) return
   stage({
@@ -725,6 +851,15 @@ function stageSimple(type: string): void {
   const item = action(type)
   if (!item) return
   stage({ type, actor_id: item.actor_id })
+}
+
+function stageDeathSave(): void {
+  const item = action('death_save')
+  if (!item) return
+  stage({
+    type: 'death_save', actor_id: item.actor_id,
+    ...(declareDeathSaveLuck.value ? { spend_luck: true } : {}),
+  })
 }
 
 // 职业能力统一走 canonical intent：只提交 capability id 与目标，成本与结算
@@ -761,6 +896,60 @@ watch(reactionSpell, spell => {
   if (!spell.available_slot_levels.includes(reactionSlot.value)) reactionSlot.value = spell.available_slot_levels[0] ?? 0
 }, { immediate: true })
 
+const windowDecision = computed<JsonObject | null>(() => {
+  const decision = pendingDecision.value
+  const kind = String(decision?.kind || '')
+  return decision && (kind === 'check_window' || kind === 'damage_window')
+    ? decision as JsonObject
+    : null
+})
+const windowLabel = computed(() => (
+  String(windowDecision.value?.kind || '') === 'damage_window'
+    ? copy.value.damageWindow
+    : copy.value.checkWindow
+))
+const windowCode = computed(() => String(windowDecision.value?.window_code || ''))
+const windowAbility = computed(() => {
+  const code = windowCode.value
+  if (code === 'lucky_disadvantage') return copy.value.windowLucky
+  if (code === 'cutting_words_check') return copy.value.windowCuttingCheck
+  if (code === 'cutting_words_damage') return copy.value.windowCuttingDamage
+  if (code === 'dark_ones_own_luck') return copy.value.windowDool
+  return localizedTerm(code)
+})
+const windowHint = computed(() => {
+  const code = windowCode.value
+  if (code === 'lucky_disadvantage') return copy.value.windowHintLucky
+  if (code === 'cutting_words_check') return copy.value.windowHintCuttingCheck
+  if (code === 'cutting_words_damage') return copy.value.windowHintCuttingDamage
+  if (code === 'dark_ones_own_luck') return copy.value.windowHintDool
+  return ''
+})
+const windowOwner = computed(() => combat.value?.actors.find(
+  actor => actor.actor_id === String(windowDecision.value?.window_owner_id || ''),
+))
+const windowResource = computed(() => {
+  const rows = windowOwner.value?.class_resources
+  return Array.isArray(rows)
+    ? rows.find(row => row.id === String(windowDecision.value?.resource_id || '')) || null
+    : null
+})
+const windowCheck = computed(() => {
+  const check = windowDecision.value?.check
+  return check && typeof check === 'object' ? check as JsonObject : null
+})
+const windowDamage = computed(() => {
+  const damage = windowDecision.value?.damage_event
+  return damage && typeof damage === 'object' ? damage as JsonObject : null
+})
+const windowRolls = computed(() => {
+  const source = windowCheck.value?.rolls ?? windowDamage.value?.rolls
+  return Array.isArray(source) ? source : []
+})
+const windowDie = computed(() => Number(
+  windowDecision.value?.die_sides ?? windowDecision.value?.damage_sides ?? 0,
+))
+
 async function decide(decision: RulesetPendingDecision, option: string, extra: JsonObject = {}): Promise<void> {
   const gameKey = props.gameKey
   busy.value = true
@@ -787,7 +976,56 @@ async function decide(decision: RulesetPendingDecision, option: string, extra: J
   }
 }
 
+function treasureTableName(ref: unknown): string {
+  const canonical = String(ref || '')
+  // Server-projected localized name only; never fall back to a canonical ref.
+  return treasureTables.value.find(table => table.table_ref === canonical)?.name
+    || copy.value.treasureTable
+}
+
+function treasureCoinsLabel(coins: unknown): string {
+  const row = coins && typeof coins === 'object' ? coins as JsonObject : {}
+  const unit = String(row.unit || '')
+  return `${Number(row.amount || 0)} ${unit === 'gp' ? copy.value.treasureCoins : unit}`
+}
+
+function treasureResultLabel(result: unknown): string {
+  const row = result && typeof result === 'object' ? result as JsonObject : {}
+  if (row.coins && typeof row.coins === 'object') return treasureCoinsLabel(row.coins)
+  if ('coins_gp' in row) return `${Number(row.coins_gp)} ${copy.value.treasureCoins}`
+  if (Array.isArray(row.items)) {
+    return (row.items as JsonObject[]).map(item => (
+      `${String(item.label || copy.value.treasureItemFallback)} ×${Number(item.qty || 0)}`
+    )).join(', ')
+  }
+  return ''
+}
+
+function treasureRollText(event: JsonObject): string {
+  const path = Array.isArray(event.path) ? event.path as JsonObject[] : []
+  const layers = path.map(layer => (
+    `${treasureTableName(layer.table_ref)} ${layer.roll} (${layer.from}-${layer.to})`
+  )).join(' → ')
+  return `${copy.value.treasureRolled}: ${layers} → ${treasureResultLabel(event.result)}`
+}
+
+async function rollTreasure(): Promise<void> {
+  const actionPayload = treasureAction.value
+  if (!actionPayload || !treasureTableRef.value) return
+  const accepted = await submit({
+    type: 'exploration.roll_treasure',
+    actor_id: String(actionPayload.actor_id || ''),
+    table_ref: treasureTableRef.value,
+    intent_id: intentId(),
+    expected_version: gameplay.value?.state_version ?? 0,
+  })
+  if (!accepted) treasureResult.value = ''
+}
+
 function describeEvent(event: JsonObject): string {
+  if (String(event.type || '') === 'dnd2024.treasure.rolled') {
+    return treasureRollText(event)
+  }
   const type = String(event.type || '')
   if (type === 'check.resolved') {
     const success = event.success ? '✓' : '✕'
@@ -802,6 +1040,8 @@ function describeEvent(event: JsonObject): string {
 watch(selectedSpellRef, () => {
   const spell = selectedSpell.value
   selectedSlot.value = spell?.available_slot_levels?.[0] ?? 0
+  declareSpellLuck.value = false
+  declareMaximize.value = false
   // Switching spells keeps the unit the player clicked when the new spell can reach it.
   const legal = targetsFor(spell)
   const kept = [inspectedId.value, ...selectedSpellTargets.value]
@@ -866,17 +1106,39 @@ onBeforeUnmount(() => { if (pollTimer) window.clearInterval(pollTimer) })
     </details>
 
     <template v-if="gameplay">
-      <EncounterPrep
-        v-if="combat?.status !== 'active'"
-        :key="gameKey"
-        :game-key="gameKey"
-        :actor-id="actorId"
-        :is-gm="isGm"
-        :data="data"
-        :busy="busy"
-        :submit="submit"
-        @navigate="emit('navigate', $event)"
-      />
+      <template v-if="combat?.status !== 'active'">
+        <EncounterPrep
+          :key="gameKey"
+          :game-key="gameKey"
+          :actor-id="actorId"
+          :is-gm="isGm"
+          :data="data"
+          :busy="busy"
+          :submit="submit"
+          @navigate="emit('navigate', $event)"
+        />
+
+        <section
+          v-if="treasureAction && treasureTables.length"
+          class="treasure-roll"
+          data-testid="gm-treasure-table"
+        >
+          <h3>{{ copy.treasureTable }}</h3>
+          <label>{{ copy.treasureTable }}
+            <select v-model="treasureTableRef" :disabled="busy">
+              <option v-for="table in treasureTables" :key="table.table_ref" :value="table.table_ref">
+                {{ table.name }}
+              </option>
+            </select>
+          </label>
+          <button class="combat-primary" :disabled="busy || !treasureTableRef" @click="rollTreasure">
+            {{ copy.rollTreasure }}
+          </button>
+          <p v-if="treasureResult" class="treasure-result" role="status">
+            <strong>{{ copy.treasureResultTitle }}</strong> {{ treasureResult }}
+          </p>
+        </section>
+      </template>
 
       <template v-else>
         <InitiativeBar
@@ -909,9 +1171,38 @@ onBeforeUnmount(() => { if (pollTimer) window.clearInterval(pollTimer) })
         </section>
 
         <section v-if="pendingDecision" class="decision-card" aria-live="assertive">
-          <strong>{{ pendingDecision.kind === 'melee_hit_spell' ? spellText.hit : pendingDecision.kind === 'hit_reaction_spell' ? spellText.hitReaction : `${copy.reaction} · ${localizedTerm(pendingDecision.kind)}` }}</strong>
+          <strong>{{ windowDecision ? `${windowLabel} · ${windowAbility}` : pendingDecision.kind === 'melee_hit_spell' ? spellText.hit : pendingDecision.kind === 'hit_reaction_spell' ? spellText.hitReaction : `${copy.reaction} · ${localizedTerm(pendingDecision.kind)}` }}</strong>
           <p v-if="pendingDecision.kind === 'melee_hit_spell'">{{ spellText.hitHint }}</p>
-          <template v-if="pendingDecision.kind === 'hit_reaction_spell'">
+          <template v-if="windowDecision">
+            <p>{{ windowHint }}</p>
+            <dl class="window-facts">
+              <div v-if="windowRolls.length">
+                <dt>{{ copy.windowRolls }}</dt>
+                <dd>{{ windowRolls.join(' / ') }}</dd>
+              </div>
+              <div v-if="windowCheck">
+                <dt>{{ copy.windowTotal }}</dt>
+                <dd>{{ windowCheck.natural }} → {{ windowCheck.total }} vs {{ windowCheck.target }}</dd>
+              </div>
+              <div v-if="windowDamage">
+                <dt>{{ copy.windowDamage }}</dt>
+                <dd>{{ windowDamage.amount }}（{{ windowDamage.damage_type }}）</dd>
+              </div>
+              <div v-if="windowResource">
+                <dt>{{ copy.windowResource }}</dt>
+                <dd>{{ windowResource.name }} {{ windowResource.current }} / {{ windowResource.maximum }}</dd>
+              </div>
+              <div v-if="windowDie">
+                <dt>{{ copy.windowDie }}</dt>
+                <dd>d{{ windowDie }}</dd>
+              </div>
+            </dl>
+            <div>
+              <button v-if="pendingDecision.options.includes('spend')" class="combat-primary" :disabled="busy" @click="decide(pendingDecision, 'spend')">{{ copy.windowSpend }}</button>
+              <button v-if="pendingDecision.options.includes('decline')" :disabled="busy" @click="decide(pendingDecision, 'decline')">{{ copy.windowDecline }}</button>
+            </div>
+          </template>
+          <template v-else-if="pendingDecision.kind === 'hit_reaction_spell'">
             <p>{{ spellText.hitReactionHint(targetName(String(pendingDecision.attacker_id || '')), Number(pendingDecision.attack_total), Number(pendingDecision.armor_class)) }}</p>
             <label v-if="reactionSpells.length > 1">{{ copy.spell }}
               <select v-model="reactionSpellRef">
@@ -969,6 +1260,10 @@ onBeforeUnmount(() => { if (pollTimer) window.clearInterval(pollTimer) })
           <template #options>
             <p v-if="dockTab === 'reaction'" class="dock-hint">{{ copy.reactionHint }}</p>
             <p v-else-if="!dockMode" class="dock-hint">{{ visibleTileCount ? copy.chooseModeHint : copy.noActionInTab }}</p>
+            <label v-if="dockTab === 'action' && action('death_save')?.lucky_advantage_available" class="declare-toggle" data-testid="death-save-lucky">
+              <input v-model="declareDeathSaveLuck" type="checkbox" />
+              <span>{{ copy.luckyAdvantage }}<small>{{ copy.luckyHint }}</small></span>
+            </label>
 
             <div v-if="dockMode === 'attack' && attackAction" class="mode-panel" data-mode="attack">
               <label>{{ copy.weapon }}
@@ -994,6 +1289,14 @@ onBeforeUnmount(() => { if (pollTimer) window.clearInterval(pollTimer) })
                 {{ copy.targetDistance }} {{ attackDistance }} {{ copy.feet }}。
                 {{ hasUsableWeapon ? copy.autoWeapon : copy.moveCloser }}
               </p>
+              <label v-if="selectedWeapon?.damage_two_handed" class="declare-toggle">
+                <input v-model="declareTwoHanded" type="checkbox" />
+                <span>{{ copy.twoHanded }}<small>{{ copy.twoHandedHint }}</small></span>
+              </label>
+              <label v-if="attackAction.lucky_advantage_available" class="declare-toggle">
+                <input v-model="declareAttackLuck" type="checkbox" />
+                <span>{{ copy.luckyAdvantage }}<small>{{ copy.luckyHint }}</small></span>
+              </label>
             </div>
 
             <div v-if="dockMode === 'spell'" class="mode-panel" data-mode="spell" data-testid="combat-spell-card">
@@ -1031,8 +1334,35 @@ onBeforeUnmount(() => { if (pollTimer) window.clearInterval(pollTimer) })
                 <label v-if="selectedSpell?.mode === 'teleport'">{{ copy.teleportDistance }}
                   <input v-model.number="teleportDistance" type="number" step="5" />
                 </label>
+                <label v-if="selectedSpell?.lucky_advantage_available" class="declare-toggle">
+                  <input v-model="declareSpellLuck" type="checkbox" />
+                  <span>{{ copy.luckyAdvantage }}<small>{{ copy.luckyHint }}</small></span>
+                </label>
+                <label v-if="selectedSpell?.maximize_damage_available" class="declare-toggle">
+                  <input v-model="declareMaximize" type="checkbox" />
+                  <span>{{ copy.maximizeDamage }}<small>{{ copy.maximizeHint }}</small></span>
+                </label>
               </template>
               <SpellAvailability :spells="spellActor?.spells || []" />
+            </div>
+
+            <div v-if="dockMode === 'item'" class="mode-panel" data-mode="item" data-testid="combat-item-card">
+              <template v-if="itemAction && itemChoices.length">
+                <label>{{ copy.item }}
+                  <select v-model="selectedItemRef">
+                    <option v-for="itemEntry in itemChoices" :key="itemEntry.item_ref" :value="itemEntry.item_ref">
+                      {{ itemEntry.name }} · {{ itemEntry.cost === 'bonus_action' ? copy.bonus : copy.action }}
+                    </option>
+                  </select>
+                </label>
+                <label v-if="selectedItem?.target === 'ally'">{{ copy.target }}
+                  <select v-model="selectedItemTargetId">
+                    <option v-for="targetItem in itemAction.targets" :key="targetItem.actor_id" :value="targetItem.actor_id">
+                      {{ targetItem.name }} · {{ targetItem.hp }}/{{ targetItem.max_hp }} HP
+                    </option>
+                  </select>
+                </label>
+              </template>
             </div>
 
             <div v-if="dockMode === 'capability'" class="mode-panel" data-mode="capability">
@@ -1082,6 +1412,16 @@ onBeforeUnmount(() => { if (pollTimer) window.clearInterval(pollTimer) })
               </label>
             </div>
 
+            <div v-if="dockMode === 'explore_item' && explorationItemAction" class="mode-panel" data-mode="explore_item" data-testid="exploration-item-card">
+              <label>{{ copy.item }}
+                <select v-model="explorationItemRef">
+                  <option v-for="itemEntry in explorationItemAction.items" :key="itemEntry.item_ref" :value="itemEntry.item_ref">
+                    {{ itemEntry.name }}
+                  </option>
+                </select>
+              </label>
+            </div>
+
             <div v-if="dockMode === 'move' && moveAction" class="mode-panel" data-mode="move">
               <p class="dock-hint">{{ copy.moveHint }}</p>
               <label>{{ copy.move }}
@@ -1100,6 +1440,9 @@ onBeforeUnmount(() => { if (pollTimer) window.clearInterval(pollTimer) })
             <ActionTile v-if="showSpellTile" :label="copy.cast" :active="dockMode === 'spell'" data-tile="spell" @click="openDockMode('spell')">
               <template #icon><NIcon :component="SparklesOutline" /></template>
             </ActionTile>
+            <ActionTile v-if="showItemTile" :label="copy.activateItem" :active="dockMode === 'item'" data-tile="item" @click="openDockMode('item')">
+              <template #icon><NIcon :component="RibbonOutline" /></template>
+            </ActionTile>
             <template v-if="dockTab === 'action'">
               <ActionTile v-if="capabilityActions.length || currentClassResources.length" :label="copy.classAbilities" :active="dockMode === 'capability'" data-tile="capability" @click="openDockMode('capability')">
                 <template #icon><NIcon :component="RibbonOutline" /></template>
@@ -1107,7 +1450,10 @@ onBeforeUnmount(() => { if (pollTimer) window.clearInterval(pollTimer) })
               <ActionTile v-if="explorationAction" :label="copy.explorationCast" :active="dockMode === 'explore'" data-tile="explore" @click="openDockMode('explore')">
                 <template #icon><NIcon :component="SparklesOutline" /></template>
               </ActionTile>
-              <ActionTile v-for="type in simpleActions" :key="type" :label="simpleLabel(type)" :disabled="busy" @click="stageSimple(type)">
+              <ActionTile v-if="explorationItemAction" :label="copy.explorationItem" :active="dockMode === 'explore_item'" data-tile="explore_item" @click="openDockMode('explore_item')">
+                <template #icon><NIcon :component="RibbonOutline" /></template>
+              </ActionTile>
+              <ActionTile v-for="type in simpleActions" :key="type" :label="simpleLabel(type)" :disabled="busy" :data-tile="type" @click="type === 'death_save' ? stageDeathSave() : stageSimple(type)">
                 <template #icon><NIcon :component="type === 'dodge' ? ShieldOutline : type === 'death_save' ? SparklesOutline : FootstepsOutline" /></template>
               </ActionTile>
             </template>
@@ -1201,9 +1547,17 @@ button, select, input { min-height: 44px; font: inherit; }
 .class-resource-strip > span { display: grid; gap: 2px; padding: 6px 9px; border: 1px solid #4a5560; border-radius: 8px; background: #0d1319; }
 .class-resource-strip small { color: #9ca6ae; font-size: 11px; }
 .class-resource-strip strong { font-size: 14px; }
+.declare-toggle { display: flex; align-items: flex-start; gap: 8px; padding: 7px 9px; border: 1px solid #4a5560; border-radius: 8px; font-size: 12px; }
+.declare-toggle input { width: auto; min-height: 0; margin-top: 2px; }
+.declare-toggle span { display: grid; gap: 2px; }
+.declare-toggle small { color: #9aa9b4; font-size: 10px; font-weight: 400; }
 .end-turn-ready { display: flex; align-items: center; gap: 6px; margin: 2px 0 0; padding: 8px 9px; border: 1px solid #b88b3e; border-radius: 8px; background: rgb(197 148 67 / 14%); color: #f2d28f; font-size: 12px; font-weight: 700; }
 .decision-card, .confirm-card { padding: 12px; border: 1px solid #c2974a; border-radius: 12px; background: #322716; }
 .decision-card div, .confirm-card div { display: flex; gap: 7px; flex-wrap: wrap; }
+.decision-card .window-facts { display: grid; gap: 4px; margin: 4px 0; }
+.decision-card .window-facts div { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; justify-content: start; }
+.decision-card .window-facts dt { color: #d8c39a; font-size: 11px; }
+.decision-card .window-facts dd { margin: 0; font-size: 12px; }
 .confirm-card { position: sticky; bottom: 12px; z-index: 2; box-shadow: 0 12px 36px rgb(0 0 0 / 45%); }
 .confirm-card code { color: #efd195; }
 .combat-primary { border-color: #c59443; background: #a56f24; color: white; }
@@ -1216,6 +1570,12 @@ button:focus-visible, select:focus-visible, input:focus-visible, .confirm-card:f
 :global(body.light .dnd-combat .resolution-log li) { background: #e8eef0; color: #27383e; }
 :global(body.light .dnd-combat .combat-mode-badge) { border-color: #ad8a4b; background: #f6ecd6; color: #4b3a1c; }
 :global(body.light .dnd-combat .combat-mode-badge.sandbox) { border-color: #8ba7b5; background: #eaf3f7; color: #26414d; }
+.treasure-roll { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; padding: 10px 12px; border: 1px solid #4c5560; border-radius: 10px; background: #1b242b; }
+.treasure-roll h3 { width: 100%; margin: 0; font-size: 14px; }
+.treasure-roll label { display: flex; flex-direction: column; gap: 4px; color: #bcb5aa; font-size: 12px; }
+.treasure-result { width: 100%; margin: 0; color: #e4d3a8; font-size: 12px; }
+:global(body.light .dnd-combat .treasure-roll) { border-color: #c2ad8d; background: #fff7e8; }
+:global(body.light .dnd-combat .treasure-result) { color: #5f4a22; }
 @media (max-width: 700px) {
   .dnd-combat { gap: 10px; margin-inline: 0; padding: 10px; border-radius: 12px; }
   .combat-header, .decision-card, .confirm-card { align-items: stretch; flex-direction: column; }

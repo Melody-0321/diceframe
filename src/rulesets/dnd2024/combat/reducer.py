@@ -5,9 +5,26 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from src.rulesets.dnd2024.character.attunement import (
+    AttunementError,
+    canonical_item_ref,
+    clear_attunement_on_death,
+)
+from ..items.charges import (
+    ChargesError,
+    spend_charges,
+    validate_charges_declaration,
+)
 from src.rulesets.dnd2024.spells.feat_spells import concentration_holder, spend_feat_free_cast
 from src.rulesets.events import EventBatchError
 from .primitives import actor_kind as _actor_kind
+
+
+_ITEM_EVENT_FIELDS = {
+    "dnd2024.item.consumed": frozenset({"type", "actor_id", "item_ref", "amount"}),
+    "dnd2024.item.activated": frozenset({"type", "actor_id", "item_ref", "target_id", "cost"}),
+    "dnd2024.item.charge_spent": frozenset({"type", "actor_id", "item_ref", "amount"}),
+}
 
 
 # 只有行动经济池可以被特性追加；其余 economy 字段（actor_id/speed/...）不是资源。
@@ -20,7 +37,7 @@ _GRANTABLE_FLAGS = frozenset({"action_surge_used"})
 # 只在回合边界到期的条件时长；战斗结束时一并清除。
 _TURN_SCOPED_DURATIONS = frozenset({
     "actor_turn_start", "target_turn_start", "caster_turn_end",
-    "caster_next_turn_end", "after_next_attack",
+    "caster_next_turn_end", "after_next_attack", "attacker_next_turn_start",
 })
 
 
@@ -120,7 +137,8 @@ class CombatReducerMixin:
             combat["outcome"] = str(event.get("reason") or "ended")
             combat["economy"] = {}
             # 狂暴靠每回合攻击或附赠动作续期；按回合计时的效果也只在回合
-            # 边界到期。战斗结束后没有回合，它们随之结束，不能带进下一场战斗。
+            # 边界到期。战斗结束后没有回合，它们随之结束；``duration=combat``
+            # （如 Hide 的 Invisible）同样以本场战斗为界，不能带进下一场战斗。
             party = [*snapshot["characters"].values()]
             companions = (state.get("party") or {}).get("companions") or {}
             for companion in companions.values():
@@ -132,7 +150,10 @@ class CombatReducerMixin:
                 for condition_id in [
                     key for key, value in conditions.items()
                     if key == "rage" or (
-                        isinstance(value, dict) and value.get("duration") in _TURN_SCOPED_DURATIONS
+                        isinstance(value, dict) and (
+                            value.get("duration") in _TURN_SCOPED_DURATIONS
+                            or value.get("duration") == "combat"
+                        )
                     )
                 ]:
                     conditions.pop(condition_id, None)
@@ -158,6 +179,44 @@ class CombatReducerMixin:
             if current < amount:
                 raise EventBatchError(f"combat resource is already spent: {resource}")
             combat["economy"][resource] = current - amount
+            return
+        if event_type in _ITEM_EVENT_FIELDS:
+            unknown = sorted(set(event) - _ITEM_EVENT_FIELDS[event_type])
+            if unknown:
+                raise EventBatchError(f"unknown {event_type} field: {unknown[0]}")
+            if event_type != "dnd2024.item.charge_spent":
+                # 数量扣减由 apply_batch 通过 live backpack 权威接口落账；
+                # reduced canonical 只记录事件事实。
+                return
+            kind, raw_id = _actor_kind(str(event["actor_id"]))
+            if kind not in {"player", "companion"}:
+                raise EventBatchError("only player/companion items hold charges")
+            character = (
+                snapshot["characters"][raw_id]
+                if kind == "player"
+                else self._companion_character(snapshot, raw_id)
+            )
+            try:
+                item_ref = canonical_item_ref(event["item_ref"])
+            except AttunementError as exc:
+                raise EventBatchError(str(exc)) from None
+            item = self.bundle.get("item", item_ref.removeprefix("item:"))
+            try:
+                maximum = validate_charges_declaration(item)
+            except ChargesError as exc:
+                raise EventBatchError(str(exc)) from None
+            if maximum is None:
+                raise EventBatchError("item has no charges")
+            state = (character.get("equipment") or {}).get("item_state")
+            charges = state.get(item_ref) if isinstance(state, dict) else None
+            entry = charges.get("charges") if isinstance(charges, dict) else None
+            current = entry.get("current") if isinstance(entry, dict) else None
+            amount = event["amount"]
+            try:
+                new_current = spend_charges(current, amount, maximum)
+            except ChargesError as exc:
+                raise EventBatchError(str(exc)) from None
+            entry["current"] = new_current
             return
         if event_type == "dnd2024.economy.granted":
             economy = combat["economy"]
@@ -355,6 +414,8 @@ class CombatReducerMixin:
             if event.get("dead"):
                 character["conditions"]["dead"] = {"source": "death_saves"}
                 character["conditions"].pop("unconscious", None)
+                # 死亡终止全部同调；复活不会把绑定还回来。
+                clear_attunement_on_death(character)
             return
         if event_type == "dnd2024.decision.pending":
             combat.setdefault("pending_decisions", []).append({
@@ -444,6 +505,7 @@ class CombatReducerMixin:
                     if death["failures"] >= 3:
                         conditions["dead"] = {"source": "damage_at_zero_hp"}
                         conditions.pop("unconscious", None)
+                        clear_attunement_on_death(character)
             elif delta > 0:
                 conditions.pop("unconscious", None)
                 conditions.pop("stable", None)

@@ -83,6 +83,35 @@ function response(status: 'none' | 'active' = 'none') {
   }
 }
 
+function itemResponse() {
+  const result = response('active') as any
+  result.available_actions.push({
+    type: 'activate_item', label: 'Use an item', actor_id: 'player:gm', expected_version: 1,
+    items: [
+      { item_ref: 'item:potion_of_healing', name: 'Potion of Healing', cost: 'action', target: 'self' },
+      { item_ref: 'item:wand_of_healing', name: 'Wand of Healing', cost: 'bonus_action', target: 'ally' },
+    ],
+    targets: [{
+      actor_id: 'player:gm', kind: 'player', name: 'Guardian', hp: 8, max_hp: 12, position: 0,
+    }, {
+      actor_id: 'player:ally', kind: 'player', name: 'Briar', hp: 0, max_hp: 12, position: 0,
+    }],
+  })
+  return result
+}
+
+function explorationItemResponse() {
+  const result = explorationResponse()
+  result.available_actions.push({
+    type: 'exploration.activate_item', label: 'Use an item', actor_id: 'player:gm',
+    expected_version: 0,
+    items: [
+      { item_ref: 'item:potion_of_healing', name: 'Potion of Healing', cost: 'action', target: 'self' },
+    ],
+  })
+  return result
+}
+
 function explorationResponse(availableSlotLevels: number[] = [1, 2]) {
   const result = response('active') as any
   result.available_actions = [{
@@ -97,6 +126,19 @@ function explorationResponse(availableSlotLevels: number[] = [1, 2]) {
       hp: 8, max_hp: 12, position: 0,
     }],
   }]
+  return result
+}
+
+function treasureResponse() {
+  const result = response('none') as any
+  result.available_actions.push({
+    type: 'exploration.roll_treasure', label: 'Roll a treasure table',
+    actor_id: 'player:gm', expected_version: 0,
+    tables: [
+      { table_ref: 'treasure_table:test_gemstones', name: 'Test gemstones' },
+      { table_ref: 'treasure_table:test_trinkets', name: 'Test trinkets' },
+    ],
+  })
   return result
 }
 
@@ -120,6 +162,72 @@ describe('D&D 2024 combat panel', () => {
     mocks.submit.mockReset().mockResolvedValue(response('active'))
     mocks.decide.mockReset().mockResolvedValue(response('active'))
     mocks.plan.mockReset().mockResolvedValue({ ok: false, error: 'unavailable' })
+  })
+
+  it('shows the GM treasure table entry and renders the server roll result', async () => {
+    const data = treasureResponse()
+    const submitted = treasureResponse()
+    submitted.result = {
+      resolved_event_batches: [{
+        events: [{
+          type: 'dnd2024.treasure.rolled', table_ref: 'treasure_table:test_gemstones',
+          path: [
+            { table_ref: 'treasure_table:test_gemstones', roll: 3, from: 3, to: 3 },
+            { table_ref: 'treasure_table:test_trinkets', roll: 4, from: 4, to: 4 },
+          ],
+          result: { items: [{ item_ref: 'item:shortbow', qty: 1, label: 'Shortbow' }] },
+        }],
+      }],
+    }
+    mocks.fetch.mockResolvedValue(data)
+    mocks.submit.mockResolvedValue(submitted)
+    const wrapper = mount(Dnd2024CombatPanel, { props: { gameKey: 'web|combat|bot', actorId: 'gm', isGm: true } })
+    await flushPromises()
+    const card = wrapper.get('[data-testid=gm-treasure-table]')
+    expect(card.text()).toContain('Random treasure table')
+    await card.get('button').trigger('click')
+    await flushPromises()
+    expect(mocks.submit).toHaveBeenCalledOnce()
+    expect(mocks.submit.mock.calls[0][1]).toMatchObject({
+      type: 'exploration.roll_treasure', table_ref: 'treasure_table:test_gemstones',
+    })
+    expect(card.text()).toContain('Test gemstones 3 (3-3)')
+    expect(card.text()).toContain('Test trinkets 4 (4-4)')
+    expect(card.text()).toContain('Shortbow ×1')
+    wrapper.unmount()
+  })
+
+  it('renders structured server currency without exposing canonical item refs', async () => {
+    const data = treasureResponse()
+    const submitted = treasureResponse()
+    submitted.result = {
+      resolved_event_batches: [{
+        events: [{
+          type: 'dnd2024.treasure.rolled', table_ref: 'treasure_table:test_gemstones',
+          path: [
+            { table_ref: 'treasure_table:test_gemstones', roll: 4, from: 4, to: 4 },
+          ],
+          result: { coins_gp: 25, coins: { amount: 25, unit: 'gp' } },
+        }],
+      }],
+    }
+    mocks.fetch.mockResolvedValue(data)
+    mocks.submit.mockResolvedValue(submitted)
+    const wrapper = mount(Dnd2024CombatPanel, { props: { gameKey: 'web|combat|bot', actorId: 'gm', isGm: true } })
+    await flushPromises()
+    const card = wrapper.get('[data-testid=gm-treasure-table]')
+    await card.get('button').trigger('click')
+    await flushPromises()
+    expect(card.text()).toContain('25 GP')
+    expect(card.text()).not.toContain('item:')
+    expect(mocks.submit.mock.calls[0][1]).toEqual({
+      type: 'exploration.roll_treasure',
+      actor_id: 'player:gm',
+      table_ref: 'treasure_table:test_gemstones',
+      intent_id: expect.any(String),
+      expected_version: expect.any(Number),
+    })
+    wrapper.unmount()
   })
 
   it('keeps known spells visible with the reason an unavailable spell cannot be cast', async () => {
@@ -501,6 +609,86 @@ describe('D&D 2024 combat panel', () => {
     await unavailableCard.find('select').setValue('spell:cure_wounds')
     expect(unavailable.get('.dock-confirm').attributes('disabled')).toBeDefined()
     unavailable.unmount()
+  })
+
+  it('submits a self item using only the server-declared ref', async () => {
+    mocks.fetch.mockResolvedValue(itemResponse())
+    const wrapper = mount(Dnd2024CombatPanel, {
+      props: { gameKey: 'web|combat|bot', actorId: 'gm', isGm: true },
+    })
+    await flushPromises()
+    expect(wrapper.get('[data-tile="item"]').text()).toContain('Use Item')
+    const card = await openTile(wrapper, 'item')
+    expect(card.find('select').exists()).toBe(true)
+    await stageFromDock(wrapper)
+    await wrapper.get('.confirm-card .combat-primary').trigger('click')
+    await flushPromises()
+    const payload = mocks.submit.mock.calls[0][1]
+    expect(payload).toMatchObject({
+      type: 'activate_item', actor_id: 'player:gm', item_ref: 'item:potion_of_healing',
+    })
+    expect(payload).not.toHaveProperty('target_id')
+    for (const key of ['hp', 'healing', 'charges', 'current', 'quantity', 'consumed']) {
+      expect(payload).not.toHaveProperty(key)
+    }
+    wrapper.unmount()
+  })
+
+  it('submits an ally item with a server-declared target and never client-side healing', async () => {
+    mocks.fetch.mockResolvedValue(itemResponse())
+    const wrapper = mount(Dnd2024CombatPanel, {
+      props: { gameKey: 'web|combat|bot', actorId: 'gm', isGm: true },
+    })
+    await flushPromises()
+    await wrapper.get('#dock-tab-bonus').trigger('click')
+    const card = await openTile(wrapper, 'item')
+    await card.findAll('select')[0]!.setValue('item:wand_of_healing')
+    await card.findAll('select')[1]!.setValue('player:ally')
+    await stageFromDock(wrapper)
+    await wrapper.get('.confirm-card .combat-primary').trigger('click')
+    await flushPromises()
+    const payload = mocks.submit.mock.calls[0][1]
+    expect(payload).toMatchObject({
+      type: 'activate_item', actor_id: 'player:gm',
+      item_ref: 'item:wand_of_healing', target_id: 'player:ally',
+    })
+    for (const key of ['hp', 'healing', 'charges', 'current', 'quantity', 'consumed']) {
+      expect(payload).not.toHaveProperty(key)
+    }
+    wrapper.unmount()
+  })
+
+  it('submits an exploration item from the existing action dock', async () => {
+    mocks.fetch.mockResolvedValue(explorationItemResponse())
+    const wrapper = mount(Dnd2024CombatPanel, {
+      props: { gameKey: 'web|combat|bot', actorId: 'gm', isGm: true },
+    })
+    await flushPromises()
+    expect(wrapper.get('[data-tile="explore_item"]').text()).toContain('Use an item')
+    await openTile(wrapper, 'explore_item')
+    await stageFromDock(wrapper)
+    await wrapper.get('.confirm-card .combat-primary').trigger('click')
+    await flushPromises()
+    const payload = mocks.submit.mock.calls[0][1]
+    expect(payload).toMatchObject({
+      type: 'exploration.activate_item', actor_id: 'player:gm', item_ref: 'item:potion_of_healing',
+    })
+    expect(payload).not.toHaveProperty('target_id')
+    for (const key of ['hp', 'healing', 'charges', 'current', 'quantity', 'consumed']) {
+      expect(payload).not.toHaveProperty(key)
+    }
+    wrapper.unmount()
+  })
+
+  it('does not render an item tile when the server projects no legal item', async () => {
+    mocks.fetch.mockResolvedValue(response('active'))
+    const wrapper = mount(Dnd2024CombatPanel, {
+      props: { gameKey: 'web|combat|bot', actorId: 'gm', isGm: true },
+    })
+    await flushPromises()
+    expect(wrapper.find('[data-tile="item"]').exists()).toBe(false)
+    expect(wrapper.find('[data-tile="explore_item"]').exists()).toBe(false)
+    wrapper.unmount()
   })
 
   it('keeps the catalog hidden in a fresh game and starts from a server-provided preset after explicit preparation', async () => {
@@ -1731,6 +1919,197 @@ describe('D&D 2024 combat panel class capabilities', () => {
     expect(wrapper.find('.turn-banner').exists()).toBe(true)
     expect(wrapper.find('.class-resource-strip').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('undefined')
+    wrapper.unmount()
+  })
+})
+
+async function mountPanel(data: unknown, actorId = 'gm') {
+  mocks.fetch.mockResolvedValue(data)
+  return mount(Dnd2024CombatPanel, {
+    props: { gameKey: 'web|combat|bot', actorId, isGm: actorId === 'gm' },
+  })
+}
+
+describe('D&D 2024 combat decisions and declarations', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    mocks.locale = 'zh-CN'
+    i18n.global.locale.value = 'zh-CN'
+    mocks.fetch.mockReset().mockResolvedValue(response('none'))
+    mocks.submit.mockReset().mockResolvedValue(response('active'))
+    mocks.decide.mockReset().mockResolvedValue(response('active'))
+    mocks.plan.mockReset().mockResolvedValue({ ok: false, error: 'unavailable' })
+  })
+
+  it('renders a check window and submits spend through the decision API', async () => {
+    const data = response('active') as any
+    data.gameplay.combat.actors[0].class_resources = [
+      { id: 'lucky_points', name: '幸运', current: 1, maximum: 3 },
+    ]
+    const decision = {
+      decision_id: 'check-window:lucky_disadvantage:intent:player:gm', kind: 'check_window',
+      surface: 'attack', window_code: 'lucky_disadvantage', window_owner_id: 'player:gm',
+      assigned_to: 'gm', options: ['spend', 'decline'], resource_id: 'lucky_points',
+      die_sides: 6, check: { rolls: [15, 3], natural: 15, total: 20, target: 16, success: true },
+    }
+    data.gameplay.combat.pending_decisions = [decision]
+    data.available_actions = [{ type: 'decision.resolve', expected_version: 1, decisions: [decision] }]
+    const wrapper = await mountPanel(data)
+    await flushPromises()
+
+    const card = wrapper.get('.decision-card')
+    expect(card.text()).toContain('检定结果窗口')
+    expect(card.text()).toContain('幸运 · 劣势骰')
+    expect(card.text()).toContain('15 / 3')
+    expect(card.text()).toContain('15 → 20 vs 16')
+    expect(card.text()).toContain('幸运 1 / 3')
+    expect(card.text()).toContain('d6')
+    await card.get('.combat-primary').trigger('click')
+    await flushPromises()
+    expect(mocks.decide).toHaveBeenCalledOnce()
+    expect(mocks.decide.mock.calls[0][1]).toBe(decision.decision_id)
+    expect(mocks.decide.mock.calls[0][2]).toMatchObject({ option: 'spend' })
+    wrapper.unmount()
+  })
+
+  it('renders a damage window with its held damage and submits decline', async () => {
+    const data = response('active') as any
+    data.gameplay.combat.actors[0].class_resources = [
+      { id: 'bardic_inspiration', name: '诗人激励', current: 2, maximum: 3 },
+    ]
+    const decision = {
+      decision_id: 'damage-window:cutting_words_damage:intent:player:gm', kind: 'damage_window',
+      surface: 'damage', window_code: 'cutting_words_damage', window_owner_id: 'player:gm',
+      assigned_to: 'gm', options: ['spend', 'decline'], resource_id: 'bardic_inspiration',
+      damage_sides: 8, damage_event: { amount: 12, damage_type: 'fire', rolls: [4, 5] },
+    }
+    data.gameplay.combat.pending_decisions = [decision]
+    data.available_actions = [{ type: 'decision.resolve', expected_version: 1, decisions: [decision] }]
+    const wrapper = await mountPanel(data)
+    await flushPromises()
+
+    const card = wrapper.get('.decision-card')
+    expect(card.text()).toContain('伤害结果窗口')
+    expect(card.text()).toContain('语出惊人 · 伤害')
+    expect(card.text()).toContain('12')
+    expect(card.text()).toContain('诗人激励 2 / 3')
+    expect(card.text()).toContain('d8')
+    const decline = card.findAll('button').find(item => item.text() === '放弃')!
+    await decline.trigger('click')
+    await flushPromises()
+    expect(mocks.decide).toHaveBeenCalledOnce()
+    expect(mocks.decide.mock.calls[0][2]).toMatchObject({ option: 'decline' })
+    wrapper.unmount()
+  })
+
+  it('does not show a window to a player who does not own it', async () => {
+    const data = response('active') as any
+    const decision = {
+      decision_id: 'check-window:lucky_disadvantage:intent:player:other', kind: 'check_window',
+      window_code: 'lucky_disadvantage', assigned_to: 'other', options: ['spend', 'decline'],
+    }
+    data.gameplay.combat.pending_decisions = [decision]
+    const wrapper = await mountPanel(data)
+    await flushPromises()
+
+    expect(wrapper.find('.decision-card').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('使用能力')
+    wrapper.unmount()
+  })
+
+  it('declares a two-handed grip only for a versatile weapon', async () => {
+    const data = response('active') as any
+    data.available_actions[0].weapons[0].damage_two_handed = '1d10'
+    const wrapper = await mountPanel(data)
+    await flushPromises()
+
+    const attack = await openTile(wrapper, 'attack')
+    expect(attack.text()).toContain('双手持用')
+    const toggles = attack.findAll('input[type=checkbox]')
+    await toggles[0].setValue(true)
+    await stageFromDock(wrapper)
+    await wrapper.get('.confirm-card .combat-primary').trigger('click')
+    await flushPromises()
+    expect(mocks.submit).toHaveBeenCalledOnce()
+    expect(mocks.submit.mock.calls[0][1]).toMatchObject({ type: 'attack', two_handed: true })
+    wrapper.unmount()
+  })
+
+  it('declares Lucky advantage on an attack only when the server offers it', async () => {
+    const data = response('active') as any
+    data.available_actions[0].lucky_advantage_available = true
+    const wrapper = await mountPanel(data)
+    await flushPromises()
+
+    const attack = await openTile(wrapper, 'attack')
+    expect(attack.text()).toContain('使用幸运优势')
+    await attack.get('input[type=checkbox]').setValue(true)
+    await stageFromDock(wrapper)
+    await wrapper.get('.confirm-card .combat-primary').trigger('click')
+    await flushPromises()
+    expect(mocks.submit).toHaveBeenCalledOnce()
+    expect(mocks.submit.mock.calls[0][1]).toMatchObject({ type: 'attack', spend_luck: true })
+    wrapper.unmount()
+  })
+
+  it('declares Lucky on a spell attack and Overchannel only when projected', async () => {
+    const data = response('active') as any
+    data.available_actions = [{
+      type: 'cast_spell', actor_id: 'player:gm', expected_version: 1,
+      spells: [{
+        spell_ref: 'spell:fire_bolt', name: '火焰箭', level: 3, casting_time: 'action',
+        mode: 'spell_attack', available_slot_levels: [3], target_count: 1,
+        lucky_advantage_available: true, maximize_damage_available: true,
+      }],
+      targets: data.gameplay.combat.actors.map((actor: any) => ({
+        actor_id: actor.actor_id, kind: actor.kind, name: actor.name,
+        hp: actor.hp, max_hp: actor.max_hp, position: actor.position,
+      })),
+    }]
+    const wrapper = await mountPanel(data)
+    await flushPromises()
+
+    await wrapper.get('[data-tile="spell"]').trigger('click')
+    const card = wrapper.get('[data-testid=combat-spell-card]')
+    expect(card.text()).toContain('使用幸运优势')
+    expect(card.text()).toContain('过载伤害最大化')
+    const toggles = card.findAll('input[type=checkbox]')
+    await toggles[0].setValue(true)
+    await toggles[1].setValue(true)
+    await stageFromDock(wrapper)
+    await wrapper.get('.confirm-card .combat-primary').trigger('click')
+    await flushPromises()
+    expect(mocks.submit).toHaveBeenCalledOnce()
+    expect(mocks.submit.mock.calls[0][1]).toMatchObject({
+      type: 'cast_spell', spend_luck: true, maximize_damage: true,
+    })
+    wrapper.unmount()
+  })
+
+  it('declares Lucky on a death save and submits the ordinary Hide action', async () => {
+    const data = response('active') as any
+    data.available_actions = [
+      { type: 'death_save', actor_id: 'player:gm', expected_version: 1, lucky_advantage_available: true },
+      { type: 'hide', actor_id: 'player:gm', expected_version: 1 },
+    ]
+    // 提交后会以服务端响应重新渲染；响应必须继续提供 Hide，否则第二次操作
+    // 会在一个不再暴露该动作的旧响应上失配。
+    mocks.submit.mockResolvedValue(data)
+    const wrapper = await mountPanel(data)
+    await flushPromises()
+
+    await wrapper.get('[data-testid=death-save-lucky] input').setValue(true)
+    const deathSave = wrapper.get('[data-tile="death_save"]')
+    await deathSave.trigger('click')
+    await wrapper.get('.confirm-card .combat-primary').trigger('click')
+    await flushPromises()
+    expect(mocks.submit.mock.calls[0][1]).toMatchObject({ type: 'death_save', spend_luck: true })
+
+    const hide = wrapper.get('[data-tile="hide"]')
+    await hide.trigger('click')
+    await wrapper.get('.confirm-card .combat-primary').trigger('click')
+    await flushPromises()
+    expect(mocks.submit.mock.calls[1][1]).toMatchObject({ type: 'hide' })
     wrapper.unmount()
   })
 })

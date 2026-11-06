@@ -43,6 +43,7 @@ from src.engine.world_template import load_world_template
 from src.content_modules.projection import ContentProjectionService
 from src.webui.services import adventures, asr, avatars, bot_access, bot_extensions, character_cards, characters, content, content_pack_maps, game_controls, game_lifecycle, game_master, game_media, game_packages, game_queries, generated_images, generation, knowledge, kp_questions, logs, lorebooks, map_backgrounds, maps, tavern, turns, worlds, rules, ruleset_advancement, ruleset_builder, ruleset_gameplay, ruleset_rest, plugins, modules, scene_images, speech, system, tunnel, announcements, assistant, hub, legal, manual_rolls, check_reveals, seat_tokens, storytelling
 from src.webui.services import lorebook_usage
+from src.webui.services import standing_portraits
 from src.webui.services import combat_extension as combat_extension_service
 from src.webui.services import adventure_runtime
 from src.game_profiles.service import ProfileService, ProfileDependencies
@@ -161,6 +162,7 @@ class WebAPI:
                  speech_service=None, asr_service=None, imagegen_service=None,
                  ruleset_registry: RulesetRuntimeRegistry | None = None,
                  content_cache_dir: Path | None = None,
+                 content_mirrors: Any | None = None,
                  config_state: dict | None = None,
                  save_config: Callable[[], None] | None = None,
                  assistant_agent_max_tokens: int = 4096,
@@ -282,6 +284,13 @@ class WebAPI:
                     asset_id,
                 ),
                 content_projection=getattr(handler, "content_projection", None),
+                standing_portrait_file=lambda asset_id: self.standing_portrait_file(
+                    asset_id,
+                ),
+            ),
+            # GAL P8：投影侧校验个人音色仍存在（失效省略，保持未配置）。
+            voice_profile_exists=(
+                lambda voice: self._voice_profile_exists(voice)
             ),
             # Table characters auto-saved into the library: never plugin cards.
             save_character_card=lambda character: character_cards.save_character_card(
@@ -391,7 +400,10 @@ class WebAPI:
             load_rule_for_game=self._load_rule_for_game,
             ruleset_registry=self._ruleset_registry,
         )
-        self._content = content.PublicContentService(content_cache_dir)
+        self._content = content.PublicContentService(
+            content_cache_dir,
+            mirror_manager=content_mirrors,
+        )
         self._legal = legal.LegalService(
             legal.LegalDependencies(
                 fetch_public_json=self.fetch_public_content_json,
@@ -399,6 +411,10 @@ class WebAPI:
             )
         )
         self._avatars = avatars.AvatarService(self._reg.save_dir.parent / "avatars")
+        self._standing_portraits = standing_portraits.StandingPortraitService(
+            self._reg.save_dir.parent / "standing-portraits",
+            is_referenced=lambda asset_id: self._standing_portrait_is_referenced(asset_id),
+        )
         self._scene_images = scene_images.SceneImageService(
             scene_images.SceneImageDependencies(
                 images_dir=self._reg.save_dir.parent / "scene-images",
@@ -1737,15 +1753,23 @@ class WebAPI:
         重放/中止后同一身份会走 ``_existing_by_source`` 的既有语义。
         """
 
-        named = [
-            {
-                "name": str(intent.get("name") or ""),
+        named = []
+        for intent in intents or []:
+            if str(intent.get("kind") or "") != "item_grant":
+                continue
+            name = str(intent.get("name") or "")
+            if not name.strip():
+                continue
+            reward = {
+                "name": name,
                 "category": str(intent.get("category") or ""),
             }
-            for intent in intents or []
-            if str(intent.get("kind") or "") == "item_grant"
-            and str(intent.get("name") or "").strip()
-        ]
+            # 身份映射是不透明的 metadata：通用 webui 层不解释 D&D 规则，
+            # 只保证它随奖励一起到达 grant_reward（缺失时保持旧形状）。
+            item_ref = str(intent.get("item_ref") or "")
+            if item_ref:
+                reward["item_ref"] = item_ref
+            named.append(reward)
         if not named:
             return []
         recipient_uid = str((intents or [{}])[0].get("recipient_uid") or "")
@@ -2522,6 +2546,23 @@ class WebAPI:
             self._character_dependencies, game_key, npc_id, portrait,
         )
 
+    async def update_npc_standing_portrait(
+        self, game_key: str, npc_id: str,
+        standing_portrait: Any = characters.UNCHANGED,
+        expressions: Any = characters.UNCHANGED,
+    ) -> dict[str, Any]:
+        return await characters.update_npc_standing_portrait(
+            self._character_dependencies, game_key, npc_id,
+            standing_portrait, expressions,
+        )
+
+    async def update_npc_voice(
+        self, game_key: str, npc_id: str, voice_profile: Any,
+    ) -> dict[str, Any]:
+        return await characters.update_npc_voice(
+            self._character_dependencies, game_key, npc_id, voice_profile,
+        )
+
     async def set_story_mode(self, game_key: str, mode: Any) -> dict[str, Any]:
         return await self._storytelling.set_mode(game_key, mode)
 
@@ -2836,6 +2877,83 @@ class WebAPI:
 
     def delete_avatar(self, asset_id: str) -> dict[str, Any]:
         return self._avatars.delete(asset_id)
+
+    # GAL P8：立绘资产（透明保留、content-addressed，见 standing_portraits）。
+    def save_standing_portrait_upload(self, file_data: str, file_name: str = "") -> dict[str, Any]:
+        return self._standing_portraits.save_upload(file_data, file_name)
+
+    def standing_portrait_file(self, asset_id: str) -> Path | None:
+        return self._standing_portraits.file(asset_id)
+
+    def delete_standing_portrait(self, asset_id: str) -> dict[str, Any]:
+        return self._standing_portraits.delete(asset_id)
+
+    def _standing_portrait_is_referenced(self, asset_id: str) -> bool:
+        """Refuse asset deletion while any persisted/live character uses it."""
+
+        def contains(value: Any) -> bool:
+            if isinstance(value, dict):
+                if (
+                    value.get("kind") == "upload"
+                    and str(value.get("asset_id") or "") == asset_id
+                ):
+                    return True
+                return any(contains(item) for item in value.values())
+            if isinstance(value, list):
+                return any(contains(item) for item in value)
+            return False
+
+        registered_dirs = set()
+        try:
+            for instance in self._reg.list_all():
+                registered_dirs.add(self._reg.save_package_state_path(instance.game_key).parent)
+                # The whole aggregate, not only players / npcs: round snapshots
+                # keep deep copies of NPCs that a rollback restores.  The save
+                # encodes only the recent log, but every loaded round can still
+                # be swiped, so the full in-memory log is scanned too.
+                if contains(instance.to_dict()) or contains(list(instance.log)):
+                    return True
+            if self._unregistered_save_mentions(asset_id, registered_dirs):
+                return True
+            cards = character_cards._read_cards(self._character_card_dependencies, strict=True)
+        except Exception:
+            # A failed reference scan must not make a referenced asset deletable.
+            logger.exception("立绘引用扫描失败，拒绝删除: %s", asset_id)
+            return True
+        return contains(cards)
+
+    def _unregistered_save_mentions(self, asset_id: str, registered_dirs: set[Path]) -> bool:
+        """True when a save the registry did not load may reference ``asset_id``.
+
+        Startup recovery registers every loadable save, so what remains here is
+        a save that failed to load (corrupt, or written by a newer runtime).
+        Its schema cannot be trusted, so match the raw text: asset ids are
+        random hex, and a false match only keeps an asset that could be deleted.
+        Unreadable files raise and the caller refuses the deletion.
+        """
+
+        save_dir = self._reg.save_dir
+        if not save_dir.exists():
+            return False
+        for entry in save_dir.iterdir():
+            if not entry.is_dir() or entry in registered_dirs:
+                continue
+            for name in ("state.json", "state.backup.json", "chatlog.jsonl"):
+                state = entry / name
+                if state.is_file() and asset_id in state.read_text(encoding="utf-8", errors="replace"):
+                    return True
+        return False
+
+    def _voice_profile_exists(self, voice_id: str) -> bool:
+        """True when the personal voice profile still exists (GAL P8)."""
+
+        speech_service = getattr(self, "_speech", None)
+        if speech_service is None:
+            return True  # 无法校验时不省略：合成端仍会 fail closed 报错。
+        return any(
+            str(item.get("id") or "") == voice_id
+            for item in speech_service.editable_voice_profiles()
+        )
 
     def image_generation_status(self) -> dict[str, Any]:
         return self._generated_images.public_config()
