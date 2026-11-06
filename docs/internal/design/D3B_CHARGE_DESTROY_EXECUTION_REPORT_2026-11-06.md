@@ -2,8 +2,8 @@
 
 - 任务书：`design/D3B_CHARGE_DESTROY_TASK_SPEC_2026-11-03.md`
 - 基线 commit：`e7b7080f`（PR #653 复审修复后的头；`ef4a5923` + 盾牌同调门控修复）
-- 分支：`feat/dnd2024-3b-charge-destroy`（stacked 在 #653 之上）
-- 状态：实现与测试完成
+- 分支：`feat/dnd2024-3b-charge-destroy`（stacked 在 #653 之上；fork #6）
+- 状态：实现与测试完成，已合入本地集成分支 `integration/dnd2024-srd`（2026-11-06）；上游 PR 仍待 #653 合并后转正
 
 ## 1. 落地内容
 
