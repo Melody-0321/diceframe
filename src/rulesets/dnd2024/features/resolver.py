@@ -673,11 +673,16 @@ class Dnd2024ClassFeatureResolver:
                 )
             terrain = str((choices.get(definition.id) or {}).get("terrain") or "")
             for raw in parameters.get("always_prepared_terrain") or ():
-                parsed = _terrain_grant_row(raw)
-                if parsed is None or parsed[1] > level or parsed[0] != terrain:
+                terrain_row = _terrain_grant_row(raw)
+                if (
+                    terrain_row is None
+                    or terrain_row[1] > level
+                    or terrain_row[0] != terrain
+                ):
                     continue
                 rows.append(self._grant_row(
-                    definition, parsed[2], parsed[1], ability, terrain=terrain,
+                    definition, terrain_row[2], terrain_row[1], ability,
+                    terrain=terrain,
                 ))
             slot = choices.get(definition.id) or {}
             if int(parameters.get("spell_choice_count") or 0):
