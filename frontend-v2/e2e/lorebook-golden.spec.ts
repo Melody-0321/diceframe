@@ -1,3 +1,4 @@
+import type { APIResponse, Locator, Page } from '@playwright/test'
 import { expect, test } from './fixtures'
 
 /**
@@ -22,6 +23,60 @@ import { expect, test } from './fixtures'
 // 与 scripts/prepare_e2e_data.py 的 E2E_LORE_WORLD_ID / E2E_LORE_GAME_KEY 一致。
 const LORE_WORLD_ID = 'e2e_lore_golden'
 const LORE_GAME_KEY = 'web|e2e-lore-golden|web_bot'
+
+/**
+ * 导入的两步都走真实写限流（60 次 / 60 秒 / 每 IP）：detect 的 preview 与 commit。
+ * 整个 smoke 套件从同一个地址写，窗口随时可能已经满了。429 在进入 handler 之前
+ * 就被拦下，什么都没落库，所以重试是安全的——照既有做法等它通告的窗口，不放宽
+ * 生产上限（见 agent-content-recovery.spec.ts 的 clickWithinBudget）。
+ */
+async function waitOutBudget(response: APIResponse): Promise<void> {
+  const body = await response.json().catch(() => ({})) as { retry_after?: number }
+  const seconds = Math.min(Math.max(Number(body.retry_after) || 5, 1), 60)
+  test.info().setTimeout(test.info().timeout + seconds * 1000)
+  await new Promise(resolve => setTimeout(resolve, seconds * 1000))
+}
+
+/** 选文件 → 等预览；撞到 429 就等窗口过去再选一次。 */
+async function openImportDialog(
+  page: Page,
+  file: { name: string; mimeType: string; buffer: Buffer },
+): Promise<Locator> {
+  const input = page.locator('input[type=file]')
+  const dialog = page.getByRole('dialog', { name: '导入资料册' })
+  for (let attempt = 0; ; attempt += 1) {
+    const responsePromise = page.waitForResponse(response =>
+      response.url().endsWith('/api/lorebooks/import/preview') && response.request().method() === 'POST')
+    await input.setInputFiles(file)
+    const response = await responsePromise
+    if (response.status() !== 429) {
+      expect(response.status()).toBe(200)
+      await expect(dialog).toBeVisible()
+      return dialog
+    }
+    if (attempt >= 3) throw new Error(`lorebook preview kept hitting the per-IP write budget (last: ${response.status()})`)
+    await waitOutBudget(response)
+    // 清空同一个 input，下一次 setInputFiles 才会再触发 change。
+    await input.setInputFiles([])
+  }
+}
+
+/** 按下「导入」→ 等对话框关闭；撞到 429 就等窗口过去再按一次。 */
+async function importWithinBudget(page: Page, dialog: Locator): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    const responsePromise = page.waitForResponse(response =>
+      response.url().endsWith('/api/lorebooks/import') && response.request().method() === 'POST')
+    await dialog.getByRole('button', { name: '导入', exact: true }).click()
+    const response = await responsePromise
+    if (response.status() !== 429) {
+      expect(response.status()).toBe(200)
+      break
+    }
+    if (attempt >= 3) throw new Error(`lorebook import kept hitting the per-IP write budget (last: ${response.status()})`)
+    await waitOutBudget(response)
+  }
+  await expect(dialog).toBeHidden()
+}
 
 /**
  * 导入 fixture 用 lorebook_v3：它能带 book 级 recursive_scanning，因此 recursion
@@ -296,31 +351,27 @@ test.describe('Lorebook Golden (real chain)', () => {
     await page.locator('.lore-context-bar select').nth(1).selectOption(LORE_WORLD_ID)
 
     // ---- SillyTavern World Info ------------------------------------------
-    await page.locator('input[type=file]').setInputFiles({
+    const stDialog = await openImportDialog(page, {
       name: 'golden-st.json', mimeType: 'application/json', buffer: Buffer.from(ST_FIXTURE),
     })
-    const stDialog = page.getByRole('dialog', { name: '导入资料册' })
     // 格式由真实后端 detect，不是前端猜的。
     await expect(stDialog).toContainText('sillytavern')
     // §7：JS-only 正则必须被报告为 unsupported，而不是静默执行。
     await expect(stDialog.locator('.lore-import-dialog__warnings')).toContainText('unsupported regex')
     await stDialog.locator('.lore-import-dialog__binding input[value=none]').check()
-    await stDialog.getByRole('button', { name: '导入', exact: true }).click()
-    await expect(stDialog).toBeHidden()
+    await importWithinBudget(page, stDialog)
     // 真实 SQLite：条目与它原样保留的正则 key 都落了库。
     await expect(page.locator('.lore-row', { hasText: '灯塔' }).first()).toBeVisible()
 
     // ---- Character Card v3（内嵌 character_book）-------------------------
-    await page.locator('input[type=file]').setInputFiles({
+    const ccDialog = await openImportDialog(page, {
       name: 'golden-ccv3.json', mimeType: 'application/json', buffer: Buffer.from(CCV3_FIXTURE),
     })
-    const ccDialog = page.getByRole('dialog', { name: '导入资料册' })
     await expect(ccDialog).toContainText('character_card_v3')
     // 产品流必须明确告诉用户这是谁的内嵌角色世界书。
     await expect(ccDialog.locator('.lore-import-dialog__character-summary')).toContainText('Golden Keeper')
     await ccDialog.locator('.lore-import-dialog__binding input[value=none]').check()
-    await ccDialog.getByRole('button', { name: '导入', exact: true }).click()
-    await expect(ccDialog).toBeHidden()
+    await importWithinBudget(page, ccDialog)
     await expect(page.locator('.lore-row', { hasText: '守夜人日志' }).first()).toBeVisible()
 
     expect(failures, `backend 5xx during the golden run:\n${failures.join('\n')}`).toEqual([])
