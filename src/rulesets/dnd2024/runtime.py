@@ -1389,6 +1389,12 @@ class Dnd2024Runtime:
             "distance", "round", "turn_index", "previous_actor_id", "condition", "reason",
             "spell_ref", "resource", "roll", "successes", "failures", "stable", "dead", "hp",
             "item_ref", "granted", "feature_id",
+            # 引导神力的效果名、治疗的最大化标记与固定预算的分配额：公共 feed
+            # 需要能讲清"这一条事件是哪个效果、分给谁多少"，但不能带出目标
+            # 之外的私有信息（Divine Sense 的位置只走私有投影）。
+            "channel_effect", "maximized", "rider", "rider_target_id",
+            "pool_total", "allocated_amount", "slot_level", "source_spell_ref",
+            "turn_effect_preserved",
         }
         combat = (
             ruleset_runtime.state(instance).get("combat")
