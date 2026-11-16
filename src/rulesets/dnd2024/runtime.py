@@ -1375,6 +1375,7 @@ class Dnd2024Runtime:
             "check.resolved", "resource.changed", "condition.applied",
             "condition.removed", "dnd2024.death_save.resolved",
             "dnd2024.character.revived", "attune_item", "unattune_item",
+            "dnd2024.heroic_inspiration.changed",
         }
         allowed_fields = {
             "type", "kind", "actor_id", "target_id", "text", "natural", "modifier",
@@ -1387,7 +1388,7 @@ class Dnd2024Runtime:
             "blocked_by_feature",
             "distance", "round", "turn_index", "previous_actor_id", "condition", "reason",
             "spell_ref", "resource", "roll", "successes", "failures", "stable", "dead", "hp",
-            "item_ref",
+            "item_ref", "granted", "feature_id",
         }
         combat = (
             ruleset_runtime.state(instance).get("combat")
