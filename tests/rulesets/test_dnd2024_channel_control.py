@@ -986,16 +986,34 @@ def test_abjure_foes_spends_one_channel_for_exactly_charisma_targets(sheets) -> 
     assert _of_type(events, "dnd2024.action.spent")
 
 
-def test_a_short_or_long_target_list_is_refused_whole(sheets) -> None:
+def test_abjure_foes_accepts_fewer_targets_than_the_ceiling(sheets) -> None:
+    """S0-F39 §1.5：数量是上界，不是必须选满。
+
+    这条覆盖了 S0-F23 原来的"恰好等于魅力调整值"口径 —— 自动化战斗里经常
+    凑不齐那么多合法目标，强制选满会让能力在多数场合直接不可用。少选不补偿：
+    事件按实际目标数各落一条，引导次数只扣一次。重复与超距仍整条拒绝。
+    """
+
     engine, instance = _setup(sheets["paladin9"])
     _start(engine, instance, enemies=_two_enemies())
-    for targets in (
-        ["enemy:goblin-1"],
-        ["enemy:goblin-1", "enemy:goblin-2", "enemy:goblin-1"],
-    ):
-        resolved = _capability(engine, instance, "abjure_foes", [3, 3], target_ids=targets)
-        assert resolved["ok"] is False
-        assert "exactly 2" in resolved["error"] or "must not repeat" in resolved["error"]
+    events = _apply(engine, instance, _capability(
+        engine, instance, "abjure_foes", [3, 3],
+        target_ids=["enemy:goblin-1"],
+    ))
+    assert _pool(instance)["current"] == 1
+    assert len(_of_type(events, "check.resolved")) == 1
+    assert [row["amount"] for row in _of_type(events, "dnd2024.class_resource.spent")] == [1]
+
+
+def test_a_duplicate_target_list_is_refused_whole(sheets) -> None:
+    engine, instance = _setup(sheets["paladin9"])
+    _start(engine, instance, enemies=_two_enemies())
+    resolved = _capability(
+        engine, instance, "abjure_foes", [3, 3],
+        target_ids=["enemy:goblin-1", "enemy:goblin-2", "enemy:goblin-1"],
+    )
+    assert resolved["ok"] is False
+    assert "must not repeat" in resolved["error"]
     assert _pool(instance)["current"] == 2
 
 

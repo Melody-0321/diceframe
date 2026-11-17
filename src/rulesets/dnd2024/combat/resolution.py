@@ -3839,6 +3839,14 @@ class CombatResolutionMixin:
         actor_id = str(intent["actor_id"])
         actor = self._actor_view(instance, combat, actor_id)
         capability_id = str(intent.get("capability_id") or "")
+        # S0-F39：目标在新形状里一律走 ``target_ids`` 数组，单目标能力也不
+        # 例外。下面这些结算函数（攻击链、神圣火花、圣疗、诗人激励）历史上都
+        # 读标量 ``target_id``，而它们与法术链共用同一份实现，所以在这里把
+        # 数组归一化成标量一次，而不是让每个结算分支各读一种形状。
+        if not intent.get("target_id"):
+            declared = self._declared_target_ids(intent)
+            if len(declared) == 1:
+                intent = {**intent, "target_id": declared[0]}
         capability = self.features.declared_capability(
             self._feature_character(actor), capability_id,
         )

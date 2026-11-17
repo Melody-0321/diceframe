@@ -8,7 +8,7 @@ from .triggered_spells import free_cast_resource
 
 from src.engine.modules import ruleset_runtime
 from src.rulesets.dnd2024.features import CombatCapabilityView
-from src.rulesets.dnd2024.features.combat import martial_arts_profile
+from src.rulesets.dnd2024.features.combat import martial_arts_profile, target_candidates
 from src.rulesets.dnd2024.features.resources import (
     OVERCHANNEL_FEATURE_ID,
     OVERCHANNEL_OWNER,
@@ -621,6 +621,116 @@ class CombatViewMixin:
             include_unavailable=include_unavailable,
             actor_id=str(actor.get("actor_id") or ""),
         )
+
+    def _capability_target_projection(
+        self, instance: Any, combat: dict[str, Any], actor: dict[str, Any],
+        view: CombatCapabilityView,
+    ) -> dict[str, Any]:
+        """Candidates, effective ceiling and budget for one capability (S0-F39).
+
+        Pure read: it walks the current actor rows and answers "who could this
+        hit, and why not the others".  Nothing here advances a clock or writes
+        state, so two projections in one request are identical.
+
+        The ceiling is *not* "how many you must pick": it is the upper bound.
+        A player may always pick fewer (never zero) -- see S0-F39 §1.5.  Only
+        ``all_in_range`` and ``budget_split`` have no declared number, and for
+        those the server fills in what the board actually offers.
+        """
+
+        if view.target_mode == "self":
+            return {}
+        character = self._feature_character(actor)
+        capability = self.features.declared_capability(character, view.id)
+        if capability is None:  # pragma: no cover - availability proved it exists
+            return {}
+        target_filter = view.target_filter
+        range_ft = self._capability_target_range(actor, capability)
+        actor_id = str(actor.get("actor_id") or "")
+        actor_position = self._position(combat, actor_id)
+        marks_bardic = any(action.kind == "bardic_grant" for action in capability.actions)
+        # target_kind 里只有 undead 是一个"生物类型"约束（bloodied 走
+        # required_condition，hostile 走 side）。候选集必须自己筛掉非亡灵，
+        # 否则 Turn Undead 会把队友也列进"射程内全部"。
+        required_creature_type = "undead" if capability.target_kind == "undead" else ""
+        raw_rows = self._all_targets(instance, combat)
+        rows: list[dict[str, Any]] = []
+        for row in raw_rows:
+            row_id = str(row.get("actor_id") or "")
+            position = row.get("position")
+            annotated = dict(row)
+            annotated["distance"] = (
+                abs(actor_position - position) if isinstance(position, int) else 0
+            )
+            if required_creature_type and row_id != actor_id:
+                annotated["creature_type"] = str(
+                    self._actor_view(instance, combat, row_id).get("creature_type") or ""
+                )
+            if target_filter.must_see and row_id != actor_id:
+                # 可见性复用与施法校验同一个判定："能看见"不能有两套答案。
+                annotated["visible"] = self._spell_target_visible(
+                    instance, combat, actor, self._actor_view(instance, combat, row_id),
+                )
+            if marks_bardic and row_id != actor_id:
+                annotated["already_affected"] = (
+                    self._active_bardic_instance(instance, combat, row_id) is not None
+                )
+            rows.append(annotated)
+        candidates = target_candidates(
+            target_filter, actor_id=actor_id, rows=rows, range_ft=range_ft,
+            required_creature_type=required_creature_type,
+        )
+        legal = [row for row in candidates if row["legal"]]
+        legal_ids = {row["actor_id"] for row in legal}
+        projection: dict[str, Any] = {
+            "candidates": candidates,
+            # ``targets`` 仍是完整的 actor 行（hp/max_hp/kind/...），只是被
+            # 合法集过滤过：老客户端读它，字段形状不该因为本切片而变窄。
+            "legal_rows": [row for row in raw_rows if str(row.get("actor_id")) in legal_ids],
+        }
+        cap = int(view.target_cap)
+        if view.target_mode == "all_in_range" or (view.budget_split and cap <= 0):
+            # 预算型的人数上界只能取合法候选数：校验侧允许某个目标分配 0 点，
+            # 所以"池子总量"并不是人数的权威约束。若在这里改成
+            # ``min(len(legal), budget_total)``，投影会比校验更严，玩家就会
+            # 看到"能选"的列表比服务端实际接受的窄 —— 只是把不一致换了个
+            # 方向。收紧它需要先在 ``_validate_preserve_life`` 里要求"每个
+            # 入选目标至少 1 点"，那是另一条改动（见执行报告 §7 未决）。
+            cap = len(legal)
+        projection["target_cap"] = cap
+        if view.budget_split:
+            projection["budget"] = self._capability_budget(
+                character, capability, legal,
+            )
+        return projection
+
+    def _capability_budget(
+        self, character: dict[str, Any], capability: Any,
+        legal: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """The spendable pool and each legal target's remaining capacity.
+
+        Preserve Life divides one pool among Bloodied creatures and can never
+        take a creature above half its Hit Points.  Both ceilings are server
+        facts, so the projection states them instead of letting the client
+        discover them by submitting too much.
+        """
+
+        per_level = self.features.feature_value(
+            character, capability.id, "preserve_life_per_level", 5,
+        )
+        state = self.features.class_state(character)
+        level = int(state[1]) if state else 0
+        total = int(per_level or 5) * level
+        capacity: dict[str, int] = {}
+        for row in legal:
+            row_id = str(row.get("actor_id") or "")
+            maximum = row.get("max_hp")
+            current = row.get("hp")
+            if not isinstance(maximum, int) or not isinstance(current, int):
+                continue
+            capacity[row_id] = max(0, maximum // 2 - current)
+        return {"total": total, "capacity": capacity}
 
     def _available_spells(
         self, instance: Any, actor: dict[str, Any], economy: dict[str, Any],

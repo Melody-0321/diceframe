@@ -15,7 +15,7 @@ from copy import deepcopy
 from typing import Any, Mapping
 
 from src.rulesets.bundle import LoadedRulesetBundle
-from src.rulesets.dnd2024.character.primitives import ABILITY_IDS
+from src.rulesets.dnd2024.character.primitives import ABILITY_IDS, ability_modifier
 from src.rulesets.dnd2024.progression.catalog import (
     Dnd2024ProgressionCatalog,
     ProgressionCatalogError,
@@ -1656,12 +1656,19 @@ class Dnd2024ClassFeatureResolver:
         definitions = {
             definition.id: definition for definition in self.resource_definitions(character)
         }
+        scores = (character or {}).get("abilities")
+        scores = scores if isinstance(scores, Mapping) else {}
+        modifiers = {
+            ability: ability_modifier(int(scores.get(ability, 10) or 10))
+            for ability in ABILITY_IDS
+        }
         return _project_capabilities(
             self.catalog,
             active,
             CombatContext.from_economy(combat_context, actor_id),
             definitions,
             include_unavailable=include_unavailable,
+            ability_modifiers=modifiers,
         )
 
     def declared_capability(

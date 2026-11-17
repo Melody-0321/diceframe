@@ -401,8 +401,21 @@ class Dnd2024CombatEngine(
                 "actor_id": current,
                 "expected_version": version,
             })
-            if capability.requires_hostile_target:
-                entry["targets"] = self._hostile_targets(instance, combat, current)
+            # S0-F39：目标形状由服务端一次性算好。``targets`` 是旧客户端读的
+            # 平铺列表，仍然只放合法目标；``candidates`` 带每一条不可选的原因，
+            # 两者的合法集合同源，不会一个说能选、另一个提交时拒绝。
+            projection = self._capability_target_projection(instance, combat, actor, capability)
+            if projection:
+                entry["target_cap"] = projection["target_cap"]
+                entry["candidates"] = projection["candidates"]
+                entry["targets"] = projection["legal_rows"]
+                if "budget" in projection:
+                    entry["budget"] = projection["budget"]
+                if not entry["targets"] and not capability.budget_split:
+                    # 候选集为空：能力仍然列出来（玩家要能看到"为什么不能用"），
+                    # 但不允许提交一个空目标数组。
+                    entry["available"] = False
+                    entry["blocked_reason"] = "no legal target is in range"
             actions.append(entry)
         if int(economy.get("movement", 0) or 0) > 0:
             actions.append({

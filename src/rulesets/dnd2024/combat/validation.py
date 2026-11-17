@@ -8,6 +8,7 @@ from typing import Any
 
 from src.engine.player_control import is_ai_controlled
 from src.rulesets.dnd2024.character.builder import ability_modifier
+from src.rulesets.dnd2024.character.primitives import ABILITY_IDS
 from src.rulesets.dnd2024.content.contracts import CREATURE_TYPES
 
 from ..character.attunement import (
@@ -18,6 +19,7 @@ from ..character.attunement import (
     item_requires_attunement,
     owned_ref_counts,
 )
+from ..features.combat import resolve_target_cap
 from ..features.models import ClassFeatureError
 from ..features.resources import (
     OVERCHANNEL_FEATURE_ID,
@@ -137,6 +139,22 @@ def validate_enemy_profiles(enemies: Any) -> None:
             if not 1 <= dice_count <= 100 or not 2 <= dice_sides <= 1000:
                 raise CombatIntentError("enemy attack damage dice are invalid")
             attack_ids.add(attack_id)
+
+
+# S0-F39：每个会读目标的 action kind 对应哪个"射程参数键 + 兜底值"。
+# 这张表存在的唯一原因是目录把射程存在特性参数里、且按键名区分能力；
+# 它与 ``_capability_target_range`` 一起构成唯一的一份对应关系。
+_TARGET_RANGE_BY_ACTION: dict[str, tuple[str, int]] = {
+    "abjure_foes": ("target_range_ft", 60),
+    "divine_spark": ("spark_target_range_ft", 30),
+    "turn_undead": ("turn_target_range_ft", 30),
+    "preserve_life": ("target_range_ft", 30),
+    "lay_on_hands": ("target_range_ft", 5),
+    "bardic_grant": ("range_ft", 0),
+    # 徒手打击的触碰距离由攻击档案决定；这里只给候选集一个保守的同格半径，
+    # 真正的命中距离仍由 _validate_attack 按武器/攻击声明判定。
+    "unarmed_strike": ("target_range_ft", 5),
+}
 
 
 class CombatValidationMixin:
@@ -619,8 +637,11 @@ class CombatValidationMixin:
         if has_unarmed_strike:
             # 复用 canonical 徒手打击校验：目标必须存活且敌对、射程由同一份
             # 攻击档案决定，Combat 不自己算命中/伤害。
+            strike_targets = self._declared_target_ids(intent)
+            if len(strike_targets) > 1:
+                raise CombatIntentError("an unarmed strike targets exactly one creature")
             self._validate_attack(instance, combat, {
-                "target_id": str(intent.get("target_id") or ""),
+                "target_id": strike_targets[0] if strike_targets else "",
                 "weapon_ref": UNARMED_STRIKE_REF,
             }, actor)
         elif has_bardic_grant:
@@ -628,7 +649,12 @@ class CombatValidationMixin:
             # 对方此刻没有一枚未过期的骰。这些事实在校验期就能用同一组权威
             # 状态判定，所以非法提交在这里得到结构化拒绝，而不是等到结算时
             # 抛异常；resolution 仍会重验一遍（纵深防御，且它要写缩略视图）。
-            target_id = str(intent.get("target_id") or "")
+            grant_targets = self._declared_target_ids(intent)
+            if len(grant_targets) > 1:
+                raise CombatIntentError(
+                    "Bardic Inspiration targets exactly one creature"
+                )
+            target_id = grant_targets[0] if grant_targets else ""
             target = self._actor_view(instance, combat, target_id)
             if target_id == actor["actor_id"]:
                 raise CombatIntentError("you cannot grant Bardic Inspiration to yourself")
@@ -708,6 +734,40 @@ class CombatValidationMixin:
             if str(target.get("side") or "") == str(actor.get("side") or "") or target["hp"] <= 0:
                 raise CombatIntentError("this capability requires a living hostile target")
 
+    @staticmethod
+    def _declared_target_ids(intent: dict[str, Any]) -> list[str]:
+        """The target list of one intent, read in exactly one place.
+
+        New clients always send ``target_ids``, even when there is one target
+        (S0-F39 §4.4.1).  The scalar ``target_id`` is still accepted because
+        saved intents and older clients produce it, and dropping it would break
+        replays and item activation without warning.  It is read *here* rather
+        than in each validator: five validators with five reading rules is how
+        "the same intent is legal in one path and illegal in another" happens.
+        """
+
+        raw = intent.get("target_ids")
+        if isinstance(raw, list):
+            return [str(item) for item in raw if str(item or "")]
+        # 兼容读取：旧存档与新前端之间只保留一个版本的过渡。
+        scalar = intent.get("target_id")
+        return [str(scalar)] if str(scalar or "") else []
+
+    @staticmethod
+    def _reject_duplicate_targets(targets: list[str], label: str) -> None:
+        if len(set(targets)) != len(targets):
+            raise CombatIntentError(f"{label} targets must not repeat")
+
+    def _is_living_undead(
+        self, instance: Any, combat: dict[str, Any], actor_id: str,
+    ) -> bool:
+        """Whether one actor is a living Undead, i.e. a legal Turn Undead target."""
+
+        view = self._actor_view(instance, combat, actor_id)
+        if int(view.get("hp", 0) or 0) <= 0:
+            return False
+        return "undead" in str(view.get("creature_type") or "").lower()
+
     def _capability_range(
         self, actor: dict[str, Any], capability: Any, key: str, default: int,
     ) -> int:
@@ -725,20 +785,55 @@ class CombatValidationMixin:
         )
         return int(range_ft) if isinstance(range_ft, int) and range_ft > 0 else default
 
+    def _capability_target_range(
+        self, actor: dict[str, Any], capability: Any,
+    ) -> int | None:
+        """The reach of one capability, resolved from its declaring action.
+
+        S0-F39 needs one number per capability for the candidate list, but the
+        catalog stores reach per *feature parameter* under a key chosen per
+        action kind (``spark_target_range_ft`` / ``turn_target_range_ft`` /
+        ``target_range_ft`` / ``range_ft``).  Rather than let the projection
+        guess, the mapping lives here once, next to the validator that already
+        reads the same keys.  A follow-up may unify these keys; until then this
+        is the only place that knows the correspondence.
+
+        ``None`` means "no reach was declared and none can be assumed" -- the
+        candidate list then skips the distance test and leaves the hard error
+        to the validator, instead of inventing a radius.
+        """
+
+        for action in capability.actions:
+            spec = _TARGET_RANGE_BY_ACTION.get(action.kind)
+            if spec is not None:
+                key, default = spec
+                value = self.features.feature_value(
+                    self._feature_character(actor), capability.feature_id, key, default,
+                )
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                    return int(value)
+                return default if default > 0 else None
+        return None
+
     def _validate_divine_spark(
         self, instance: Any, combat: dict[str, Any], intent: dict[str, Any],
         actor: dict[str, Any], capability: Any,
     ) -> None:
         """Divine Spark: another living creature, 30 feet, one of two modes."""
 
-        target_id = str(intent.get("target_id") or "")
-        if not target_id:
+        targets = self._declared_target_ids(intent)
+        if not targets:
             raise CombatIntentError("Divine Spark requires a target")
+        if len(targets) > 1:
+            raise CombatIntentError("Divine Spark targets exactly one creature")
+        target_id = targets[0]
         if target_id == str(actor["actor_id"]):
             raise CombatIntentError("Divine Spark cannot target yourself")
         target = self._actor_view(instance, combat, target_id)
-        if target["hp"] <= 0:
-            raise CombatIntentError("Divine Spark targets a living creature")
+        # 0 HP 的盟友恰恰最需要这一发：契约写的是"你能看见的另一生物"，
+        # 没有"必须活着"。用 living 当门槛会把倒地队友挡在外面。
+        if not self._spell_target_visible(instance, combat, actor, target):
+            raise CombatIntentError("Divine Spark targets a creature you can see")
         self._require_range(
             combat, str(actor["actor_id"]), target_id,
             self._capability_range(actor, capability, "spark_target_range_ft", 30),
@@ -767,14 +862,19 @@ class CombatValidationMixin:
         self, instance: Any, combat: dict[str, Any], intent: dict[str, Any],
         actor: dict[str, Any], capability: Any,
     ) -> None:
-        """Turn Undead: a de-duplicated set of Undead inside the declared reach."""
+        """Turn Undead: every Undead inside the declared reach, and only those.
 
-        raw = intent.get("target_ids")
-        if not isinstance(raw, list) or not raw:
+        ``all_in_range`` (S0-F39 §4.2.2) means the player does not pick: the
+        candidate set *is* the submission.  A subset is rejected because there
+        is no rule that lets a cleric spare one skeleton while turning the rest
+        -- and silently accepting the subset would make the frontend the
+        authority on who gets turned.
+        """
+
+        targets = self._declared_target_ids(intent)
+        if not targets:
             raise CombatIntentError("Turn Undead requires at least one Undead target")
-        targets = [str(item) for item in raw]
-        if len(set(targets)) != len(targets):
-            raise CombatIntentError("Turn Undead targets must not repeat")
+        self._reject_duplicate_targets(targets, "Turn Undead")
         limit = self._capability_range(actor, capability, "turn_target_range_ft", 30)
         for target_id in targets:
             target = self._actor_view(instance, combat, target_id)
@@ -783,6 +883,17 @@ class CombatValidationMixin:
             if "undead" not in str(target.get("creature_type") or "").lower():
                 raise CombatIntentError("Turn Undead targets only Undead creatures")
             self._require_range(combat, str(actor["actor_id"]), target_id, limit)
+        in_reach = {
+            str(row["actor_id"])
+            for row in self._all_targets(instance, combat)
+            if str(row["actor_id"]) != str(actor["actor_id"])
+            and self._distance(combat, str(actor["actor_id"]), str(row["actor_id"])) <= limit
+            and self._is_living_undead(instance, combat, str(row["actor_id"]))
+        }
+        if set(targets) != in_reach:
+            raise CombatIntentError(
+                "Turn Undead affects every Undead in range; submit the whole set"
+            )
         if intent.get("sear_undead") not in (None, False):
             if intent.get("sear_undead") is not True:
                 raise CombatIntentError("sear_undead must be a boolean")
@@ -795,34 +906,37 @@ class CombatValidationMixin:
         self, instance: Any, combat: dict[str, Any], intent: dict[str, Any],
         actor: dict[str, Any], capability: Any,
     ) -> None:
-        """Abjure Foes: exactly Charisma-modifier creatures you can see.
+        """Abjure Foes: up to Charisma-modifier creatures you can see.
 
-        "Exactly" is the rule, not a convenience: the feature targets *a number
-        of creatures equal to* the modifier, so a shorter list is as illegal as
-        a longer one, and refusing the whole intent is the only rejection that
-        cannot leave a partially-paid Channel use behind.
+        The rulebook says *equal to* the modifier.  This engine treats it as an
+        upper bound with a floor of one (S0-F39 §1.5, §4.2): an automated
+        encounter often does not contain that many legal targets, and demanding
+        the full count would make the capability unusable exactly when the party
+        is outnumbered by fewer foes than the paladin's Charisma allows.
+        **Do not turn this back into an equality check.**
+
+        Refusing the whole intent on failure is still correct: a partial success
+        would leave a paid Channel Divinity behind with nothing to show for it.
         """
 
-        raw = intent.get("target_ids")
-        if not isinstance(raw, list) or not raw:
+        targets = self._declared_target_ids(intent)
+        if not targets:
             raise CombatIntentError("Abjure Foes requires at least one target")
-        targets = [str(item) for item in raw]
-        if len(set(targets)) != len(targets):
-            raise CombatIntentError("Abjure Foes targets must not repeat")
+        self._reject_duplicate_targets(targets, "Abjure Foes")
+        # 上界只有一处算法：``resolve_target_cap``。这里若再自己读一遍
+        # ``actor["abilities"]`` 算一次，投影和校验就会各自持有"这个角色能选
+        # 几个"，两个来源一旦分叉，玩家看到"可以选 3 个"却被按 2 个拒。
         character = self._feature_character(actor)
-        ability = str(self.features.feature_value(
-            character, capability.feature_id, "target_count_ability", "cha",
-        ) or "cha")
-        minimum = int(self.features.feature_value(
-            character, capability.feature_id, "target_count_minimum", 1,
-        ) or 1)
-        count = max(
-            minimum,
-            ability_modifier(int((actor.get("abilities") or {}).get(ability, 10) or 10)),
-        )
-        if len(targets) != count:
+        scores = (character or {}).get("abilities")
+        scores = scores if isinstance(scores, dict) else {}
+        modifiers = {
+            ability: ability_modifier(int(scores.get(ability, 10) or 10))
+            for ability in ABILITY_IDS
+        }
+        ceiling = resolve_target_cap(capability, modifiers)
+        if len(targets) > ceiling:
             raise CombatIntentError(
-                f"Abjure Foes must target exactly {count} creatures"
+                f"Abjure Foes targets at most {ceiling} creatures"
             )
         limit = self._capability_range(actor, capability, "target_range_ft", 60)
         for target_id in targets:
@@ -849,6 +963,12 @@ class CombatValidationMixin:
         rows = intent.get("allocations")
         if not isinstance(rows, list) or not rows:
             raise CombatIntentError("Preserve Life requires at least one allocation")
+        # 预算型能力的目标出现在两处：``target_ids`` 说明"选了谁"，
+        # ``allocations`` 说明"每人分多少"。两处必须指着同一批人（§4.4.4），
+        # 否则前端显示的目标和服务端实际治疗的目标会不一样，而玩家只会看到
+        # 一个对不上的结果。旧意图没有 target_ids，此时以 allocations 为准。
+        declared_targets = self._declared_target_ids(intent)
+        self._reject_duplicate_targets(declared_targets, "Preserve Life")
         character = self._feature_character(actor)
         per_level = self.features.feature_value(
             character, capability.id, "preserve_life_per_level", 5,
@@ -870,8 +990,8 @@ class CombatValidationMixin:
                 raise CombatIntentError("a Preserve Life target may appear only once")
             seen.add(target_id)
             target = self._actor_view(instance, combat, target_id)
-            if target["hp"] <= 0:
-                raise CombatIntentError("Preserve Life targets a living creature")
+            # 契约只要求"Bloodied"，而 0 HP 就是最 Bloodied 的状态；
+            # 在这里拦 0 HP 等于禁止把队友从死亡豁免里拉起来。
             self._require_range(combat, str(actor["actor_id"]), target_id, limit)
             maximum = int(target["max_hp"])
             if int(target["hp"]) * 2 > maximum:
@@ -884,6 +1004,10 @@ class CombatValidationMixin:
                     "Preserve Life cannot restore a creature above half its Hit Points"
                 )
             total += amount
+        if declared_targets and set(declared_targets) != seen:
+            raise CombatIntentError(
+                "Preserve Life targets and allocations must name the same creatures"
+            )
         if total > budget:
             raise CombatIntentError(
                 "the Preserve Life allocation exceeds this use's budget"
@@ -926,9 +1050,12 @@ class CombatValidationMixin:
     ) -> None:
         """Lay On Hands: one touched creature, a pool that pays, conditions owned."""
 
-        target_id = str(intent.get("target_id") or "")
-        if not target_id:
+        targets = self._declared_target_ids(intent)
+        if not targets:
             raise CombatIntentError("Lay On Hands requires a target")
+        if len(targets) > 1:
+            raise CombatIntentError("Lay On Hands targets exactly one creature")
+        target_id = targets[0]
         target = self._actor_view(instance, combat, target_id)
         if "dead" in (target.get("conditions") or {}):
             raise CombatIntentError("Lay On Hands cannot restore a dead creature")

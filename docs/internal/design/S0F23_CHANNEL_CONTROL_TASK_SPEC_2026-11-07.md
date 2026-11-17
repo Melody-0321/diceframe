@@ -124,7 +124,9 @@ SRD 5.2.1 p179，Cover：Half Cover 提供 +2 AC 与 +2 Dexterity saving throws�
 9. 光环内持有者和盟友 Half Cover，AC/Dex save +2；光环外、敌人和失能光环不适用。
 10. Half Cover 与更高掩蔽不叠加，多个实例只取最高；下一回合开始准时结束，再次施法刷新。
 11. Abjure Foes 为 Magic action+一次 Channel，目标数为 max(1,Cha)，全部可见且 60 尺内。
-12. 少选、多选、重复目标、超距或不可见时零事件；恰好选足数量时多目标只扣一次 Channel。
+12. 多选、重复目标、超距或不可见时零事件；多目标只扣一次 Channel。
+    **口径修订（2026-11-17，见 S0-F39 §1.5）**：数量改为“至多 N、至少 1”，
+    少选合法，不再要求恰好选足。原“少选即拒”一条作废。
 13. 每目标 Wis save 独立，失败者 Frightened、成功者无状态；DC 使用 Paladin spell save DC。
 14. 失败目标回合选择移动后不能动作/附赠动作，选择动作后不能移动/附赠动作，选择附赠动作同理。
 15. Abjure 不是 Incapacitated，反应仍按通用规则；Action Surge 不能绕过三选一限制。

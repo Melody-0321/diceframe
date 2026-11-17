@@ -107,10 +107,11 @@ const spellActor = computed(() => combat.value?.actors?.find(actor => actor.acto
 const capabilityActions = computed<RulesetCombatAction[]>(() => (
   actions.value.filter(item => item.type === 'class_capability')
 ))
-const capabilityTargets = computed<RulesetCombatTarget[]>(() => (
-  capabilityActions.value.find(item => item.requires_target)?.targets || []
-))
-const capabilityTargetId = ref('')
+// 选目标（S0-F39）：服务端投影 candidates（每条带 legal 与不可选原因）与
+// target_cap（已算成整数的上界）。前端只做"渲染几个选择框"，不自己算魅力
+// 调整值、不自己判距离与阵营——那套判断已经在服务端有三份实现，再抄一份就是
+// 第四份。空数组表示"还没选"，不是"选了 0 个"。
+const capabilityTargetIds = ref<string[]>([''])
 // 只有服务端投影出的数组才渲染：老存档 / 敌人 actor / 缺失投影一律退化为「没有
 // 职业资源」，绝不能让一个不是数组的值把整块战斗面板渲染炸掉。
 const currentClassResources = computed<CharacterClassResource[]>(() => {
@@ -404,12 +405,69 @@ const targetCardLabels = computed(() => ({
 const selectedCapability = computed(() => capabilityActions.value.find(
   item => item.capability_id === selectedCapabilityId.value,
 ))
+// 合法目标来自服务端 candidates；旧 targets 只作兜底（老存档的投影里没有
+// candidates）。两者同源，所以不会出现"列表里有、提交被拒"。
+type CapabilityTargetOption = { actor_id: string; name: string }
+const capabilityTargets = computed<CapabilityTargetOption[]>(() => {
+  const capability = selectedCapability.value
+  const rows = capability?.candidates?.filter(row => row.legal) || []
+  if (rows.length) return rows.map(row => ({ actor_id: row.actor_id, name: row.name }))
+  return (capability?.targets || []).map(row => ({ actor_id: row.actor_id, name: row.name }))
+})
+// 需要渲染几个选择框：single 一个；up_to 给到上界那么多（留空表示少选，
+// 这是允许的）；all_in_range 不接受挑选，直接把整组目标显示成固定列表。
+const capabilityTargetSlots = computed(() => {
+  const capability = selectedCapability.value
+  if (!capability?.requires_target) return 0
+  if (capability.target_mode === 'all_in_range') return 0
+  return Math.max(1, Number(capability.target_cap || 1))
+})
+const capabilityAllTargets = computed<CapabilityTargetOption[]>(() => (
+  selectedCapability.value?.target_mode === 'all_in_range' ? capabilityTargets.value : []
+))
+const capabilitySelection = computed(() => {
+  const capability = selectedCapability.value
+  if (capability?.target_mode === 'all_in_range') {
+    // 射程内全部：玩家不挑，服务端给出的合法候选集就是提交集。这里必须
+    // 直接回填整组，否则 `valid` 会一直为假（槽位是 0），按钮永远点不动
+    // —— 那正是"服务端能表达、界面不可达"的老毛病。
+    const all = capabilityTargets.value.map(row => row.actor_id)
+    return { ids: all, valid: all.length >= 1 }
+  }
+  const cap = Math.max(1, Number(capability?.target_cap || 1))
+  const ids = capabilityTargetIds.value.map(id => String(id || '')).filter(Boolean)
+  const unique = Array.from(new Set(ids))
+  return {
+    ids: unique,
+    valid: unique.length >= 1 && unique.length <= cap && unique.length === ids.length,
+  }
+})
+// 换能力时重建选择槽：上一个能力选的目标对新能力没有意义，留着会让玩家以为
+// 自己已经选好，提交时才发现被拒。
+watch(
+  () => [
+    selectedCapabilityId.value,
+    capabilityTargetSlots.value,
+    capabilityTargets.value.map(row => row.actor_id).join(','),
+  ] as const,
+  () => {
+    const legal = capabilityTargets.value.map(row => row.actor_id)
+    const kept = capabilityTargetIds.value.filter(id => id && legal.includes(id))
+    const slots = Math.max(1, capabilityTargetSlots.value)
+    capabilityTargetIds.value = Array.from(
+      { length: slots }, (_unused, index) => kept[index] || '',
+    )
+  },
+  { immediate: true },
+)
 // The unit the open action would be sent at; empty while no aimed action is open.
 const aimedTargetId = computed(() => {
   switch (dockMode.value) {
     case 'attack': return selectedTargetId.value
     case 'spell': return selectedSpellTargets.value[0] || ''
-    case 'capability': return selectedCapability.value?.requires_target ? capabilityTargetId.value : ''
+    case 'capability': return selectedCapability.value?.requires_target
+      ? (capabilitySelection.value.ids[0] || '')
+      : ''
     case 'item': return selectedItem.value?.target === 'ally' ? selectedItemTargetId.value : ''
     case 'explore': return explorationTargetId.value
     case 'explore_item': return ''
@@ -477,7 +535,8 @@ const canStageDock = computed(() => {
     case 'spell': return Boolean(spellTargetsValid.value
       && spellChoices.value.some(item => item.spell_ref === selectedSpellRef.value))
     case 'capability': return Boolean(selectedCapability.value
-      && (!selectedCapability.value.requires_target || capabilityTargetId.value))
+      && !selectedCapability.value.budget_split
+      && (!selectedCapability.value.requires_target || capabilitySelection.value.valid))
     case 'item': return Boolean(selectedItem.value
       && (selectedItem.value.target !== 'ally' || selectedItemTargetId.value))
     case 'explore': return Boolean(explorationSpellRef.value && explorationSlotValid.value)
@@ -552,7 +611,15 @@ function pickBattleTarget(actorId: string): void {
       selectedSpellTargets.value = targets
     }
   }
-  if (capabilityTargets.value.some(item => item.actor_id === actorId)) capabilityTargetId.value = actorId
+  if (capabilityTargets.value.some(item => item.actor_id === actorId)) {
+    const slots = capabilityTargetIds.value.slice()
+    if (!slots.includes(actorId)) {
+      const empty = slots.findIndex(id => !id)
+      if (empty >= 0) slots[empty] = actorId
+      else if (slots.length < capabilityTargetSlots.value) slots.push(actorId)
+      capabilityTargetIds.value = slots
+    }
+  }
   if (itemAction.value?.targets?.some(item => item.actor_id === actorId)) selectedItemTargetId.value = actorId
   if (explorationAction.value?.targets?.some(item => item.actor_id === actorId)) explorationTargetId.value = actorId
 }
@@ -700,7 +767,8 @@ function resetSelections(): void {
     selectedResistType.value = ''
   }
   selectedTargetId.value = keepOrFirst(selectedTargetId.value, attackAction.value?.targets || [])
-  capabilityTargetId.value = keepOrFirst(capabilityTargetId.value, capabilityTargets.value)
+  capabilityTargetIds.value = capabilityTargetIds.value
+    .map(id => (capabilityTargets.value.some(item => item.actor_id === id) ? id : ''))
   selectedItemTargetId.value = keepOrFirst(
     selectedItemTargetId.value, itemAction.value?.targets || [],
   )
@@ -935,7 +1003,8 @@ function stageDeathSave(): void {
 }
 
 // 职业能力统一走 canonical intent：只提交 capability id 与目标，成本与结算
-// 全部由服务端 capability 声明和既有攻击链决定。
+// 全部由服务端 capability 声明和既有攻击链决定。目标一律发数组，单目标也用
+// 数组——服务端只需要一种读法。
 function stageCapability(capability: RulesetCombatAction): void {
   if (!capability.capability_id) return
   const payload: JsonObject = {
@@ -944,9 +1013,11 @@ function stageCapability(capability: RulesetCombatAction): void {
     capability_id: capability.capability_id,
   }
   if (capability.requires_target) {
-    const targetId = capabilityTargetId.value
-    if (!targetId) return
-    payload.target_id = targetId
+    // `capabilitySelection` 已经把 `all_in_range` 折算成"整组候选"，这里
+    // 不再为它写第二条分支 —— 一种形状两条读法是所有不一致的来源。
+    const ids = capabilitySelection.value.ids
+    if (!ids.length) return
+    payload.target_ids = ids
   }
   stage(payload)
 }
@@ -1106,6 +1177,9 @@ function describeEvent(event: JsonObject): string {
   if (type === 'resource.changed') {
     return `${targetName(String(event.target_id || ''))} HP ${Number(event.delta || 0) > 0 ? '+' : ''}${event.delta}`
   }
+  // 回合开始窗口的关闭是记账，不是玩家做过的事；回退分支会把裸类型名
+  // 打进战报，于是 Monk 18 每回合第一件事都会留一行英文。
+  if (type === 'dnd2024.turn_window.closed') return ''
   return type.replace(/^dnd2024\./, '')
 }
 
@@ -1456,14 +1530,25 @@ onBeforeUnmount(() => { if (pollTimer) window.clearInterval(pollTimer) })
                 </button>
               </div>
               <p v-else class="range-guide">{{ copy.noCapabilityAvailable }}</p>
-              <label v-if="selectedCapability?.requires_target && capabilityTargets.length">{{ copy.target }}
-                <select v-model="capabilityTargetId">
-                  <option v-for="targetItem in capabilityTargets" :key="targetItem.actor_id" :value="targetItem.actor_id">
-                    {{ targetItem.name }} · {{ targetItem.hp }}/{{ targetItem.max_hp }} HP
-                  </option>
-                </select>
-              </label>
+              <!-- all_in_range：玩家不挑，服务端把射程内全部列出来，提交时整组发回。 -->
+              <p v-if="selectedCapability?.requires_target && selectedCapability.target_mode === 'all_in_range' && capabilityAllTargets.length"
+                 class="range-guide">
+                {{ copy.target }}：{{ capabilityAllTargets.map(row => row.name).join('、') }}
+              </p>
+              <template v-else-if="selectedCapability?.requires_target && capabilityTargets.length">
+                <label v-for="(_slot, index) in capabilityTargetIds" :key="index">
+                  {{ copy.target }}{{ capabilityTargetIds.length > 1 ? ` ${index + 1}` : '' }}
+                  <select v-model="capabilityTargetIds[index]">
+                    <!-- 空槽表示"少选一个"：上界不是必须选满，但至少要选一个。 -->
+                    <option value="">—</option>
+                    <option v-for="targetItem in capabilityTargets" :key="targetItem.actor_id" :value="targetItem.actor_id">
+                      {{ targetItem.name }}
+                    </option>
+                  </select>
+                </label>
+              </template>
               <p v-else-if="selectedCapability?.requires_target" class="range-guide blocked">{{ copy.noCapabilityTarget }}</p>
+              <p v-if="selectedCapability?.budget_split" class="range-guide blocked">{{ copy.capabilityBudgetUnsupported }}</p>
             </div>
 
             <div v-if="dockMode === 'explore' && explorationAction" class="mode-panel" data-mode="explore">

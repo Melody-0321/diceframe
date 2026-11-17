@@ -1300,6 +1300,38 @@ export interface RulesetCapabilityCost {
   maximum: number
 }
 
+/**
+ * One entry of a capability's server-computed candidate list (S0-F39).
+ *
+ * ``legal`` is the whole answer to "may I pick this one"; ``reason`` is its
+ * human-readable cause (``out_of_range`` / ``cannot_see`` / ``wrong_side`` /
+ * ``dead`` / ``zero_hp`` / ``not_bloodied`` / ``already_affected``).  The
+ * client must not re-derive legality from distance, side or HP: the server
+ * already answered, and a second opinion is how "offered but rejected" happens.
+ */
+export interface RulesetCombatCandidate {
+  actor_id: string
+  name: string
+  legal: boolean
+  reason: string
+}
+
+/** The admission filter the server applied when building the candidates. */
+export interface RulesetCapabilityTargetFilter {
+  side?: 'self' | 'ally' | 'enemy' | 'any'
+  must_see?: boolean
+  allow_zero_hp?: boolean
+  allow_dead?: boolean
+  allow_self?: boolean
+  required_condition?: string
+}
+
+/** A spendable pool the capability divides between its targets. */
+export interface RulesetCapabilityBudget {
+  total: number
+  capacity: Record<string, number>
+}
+
 export interface RulesetCombatWeapon extends JsonObject {
   id: string
   name?: string
@@ -1370,6 +1402,17 @@ export interface RulesetCombatAction extends JsonObject {
   feature_id?: string
   costs?: RulesetCapabilityCost[]
   requires_target?: boolean
+  /**
+   * Target shape (S0-F39): ``self`` / ``single`` / ``up_to`` / ``all_in_range``.
+   * ``target_cap`` is already an integer -- the client never sees the ability
+   * name it came from, so it can never compute a different ceiling.
+   */
+  target_mode?: 'self' | 'single' | 'up_to' | 'all_in_range'
+  target_cap?: number
+  target_filter?: RulesetCapabilityTargetFilter
+  budget_split?: boolean
+  candidates?: RulesetCombatCandidate[]
+  budget?: RulesetCapabilityBudget
   /** Declared only for actions whose roll can still spend a Lucky point. */
   lucky_advantage_available?: boolean
 }

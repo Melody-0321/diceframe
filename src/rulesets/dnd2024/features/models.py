@@ -84,6 +84,32 @@ CHECK_WINDOW_TRIGGERS = frozenset({
 TARGET_KINDS = frozenset({
     "none", "creature", "bloodied_creature", "undead", "hostile",
 })
+# S0-F39：目标**形状**是比 target_kind 更外一层的问题。target_kind 回答"什么
+# 样的生物可以当目标"，target_mode 回答"玩家要不要选、能选几个"。两者不能合成
+# 一个字段：Turn Undead 与 Abjure Foes 的 target_kind 都是活物/亡灵，但前者由
+# 服务端把射程内全部亡灵一次性结算，后者让玩家自己挑 N 个。
+#
+# ``self``      不取目标（狂暴、超级防御、侦测善恶）。
+# ``single``    恰好一个目标，等价于 ``up_to`` 且上界为 1。
+# ``up_to``     玩家挑 1..cap 个；cap 可能由属性算出。
+# ``all_in_range`` 玩家不挑：候选集本身就是提交集。
+TARGET_MODES = frozenset({"self", "single", "up_to", "all_in_range"})
+# 目标与施术者的阵营关系。``any`` 不是"没有限制"的偷懒写法：Abjure Foes 按
+# 原文可以指向任何看得见的生物（包括队友），所以它必须能表达"任意"。
+TARGET_SIDES = frozenset({"self", "ally", "enemy", "any"})
+# 这些 action kind 的实现会从意图里读目标 id。声明成 self 却又带这类 action，
+# 就是"能力明明要选人，投影却告诉前端不用选"——Bardic Inspiration 当初正是
+# 这样变成界面上不可用的孤儿。装载期直接拒绝，而不是等到玩家点了才报错。
+TARGET_CONSUMING_ACTIONS = frozenset({
+    "unarmed_strike", "bardic_grant", "divine_spark", "turn_undead",
+    "preserve_life", "lay_on_hands", "abjure_foes",
+})
+# 特性参数里只要出现这些键，就说明作者心里已经有一个"对谁生效"的模型；
+# 此时缺 target_mode 必须报错，不能替他猜一个默认值（§4.5.1）。
+TARGET_SHAPING_PARAMETER_KEYS = frozenset({
+    "target_range_ft", "target_count_ability", "target_count_minimum",
+    "spark_target_range_ft", "turn_target_range_ft",
+})
 
 
 class ClassFeatureError(ValueError):
@@ -200,6 +226,44 @@ class CapabilityAction:
 
 
 @dataclass(frozen=True, slots=True)
+class TargetFilter:
+    """Which creatures a capability's target shape admits.
+
+    This is the *only* place where "who may I pick" is written down.  Before
+    S0-F39 the same question was answered three times over: the projection said
+    ``requires_target``, each validator re-checked side/hp/range inline, and the
+    frontend decided which list to offer.  Three answers to one question drift.
+
+    ``side`` is relative to the acting character: ``ally`` admits the actor's
+    own side, ``enemy`` is the opposite side, ``any`` admits both.  ``side``
+    alone cannot separate "anyone, but not yourself" (Abjure Foes) from
+    "anyone, and yourself included" (Preserve Life says "which can include
+    you"), so ``allow_self`` carries that one bit rather than overloading the
+    four side values.  ``required_condition`` names a state code the target must
+    hold (Preserve Life's ``bloodied``).
+    """
+
+    side: str = "any"
+    must_see: bool = False
+    allow_zero_hp: bool = False
+    allow_dead: bool = False
+    required_condition: str = ""
+    allow_self: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "side": self.side,
+            "must_see": self.must_see,
+            "allow_zero_hp": self.allow_zero_hp,
+            "allow_dead": self.allow_dead,
+            "allow_self": self.allow_self,
+        }
+        if self.required_condition:
+            payload["required_condition"] = self.required_condition
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
 class FeatureCapability:
     """A combat capability a class feature grants.
 
@@ -209,6 +273,12 @@ class FeatureCapability:
     target the caster, and Turn Undead only accepts Undead.  Spelling the set
     out here is what lets validation and the availability projection agree
     without re-reading the effect kind.
+
+    ``target_mode`` answers the *other* half of the same question -- whether the
+    player picks, and how many they may pick -- and is deliberately separate
+    from ``target_kind``.  ``target_cap`` is the resolved integer ceiling unless
+    the ceiling is ability-derived, in which case ``target_cap_ability`` names
+    the ability and ``target_cap_minimum`` floors it.
 
     ``pool_resource_id`` names a resource whose *remaining amount* gates
     availability but whose spend is decided per intent (Lay On Hands).  A
@@ -226,6 +296,12 @@ class FeatureCapability:
     once_per_turn: bool = False
     target_kind: str = "none"
     pool_resource_id: str = ""
+    target_mode: str = "self"
+    target_cap: int | None = None
+    target_cap_ability: str = ""
+    target_cap_minimum: int = 1
+    target_filter: TargetFilter = field(default_factory=TargetFilter)
+    budget_split: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -570,6 +646,152 @@ class FeatureCatalogIndex(Mapping[Any, ClassFeatureDefinition]):
         return len(self._by_key)
 
 
+# 上界可以由哪一项属性调整值算出。闭集：拼错的属性名会让上界静默退化成
+# "至少 1"，那是玩家看得见、却没人报错的错误。
+TARGET_CAP_ABILITIES = frozenset({"str", "dex", "con", "int", "wis", "cha"})
+
+
+def _parse_target_shape(
+    capability_id: str,
+    raw: Any,
+    parameters: Mapping[str, Any],
+    *,
+    target_kind: str,
+    requires_hostile_target: bool,
+    actions: tuple[CapabilityAction, ...],
+    budget_split: bool,
+) -> tuple[str, int | None, str, int]:
+    """Resolve one capability's target *shape* at load time (S0-F39 §4.1).
+
+    Returns ``(mode, cap, cap_ability, cap_minimum)``.  ``cap`` is the integer
+    ceiling when it is a constant, and ``None`` when it has to be derived from
+    ``cap_ability`` at projection time -- the declaration may know "Charisma
+    modifier" but not what that character's Charisma is.
+
+    ``all_in_range`` deliberately has no declared ceiling: the candidate set
+    *is* the submission, so the ceiling is whatever the server finds in range.
+    A ``budget_split`` capability (Preserve Life) is the other case with no
+    count ceiling: the binding constraint is the pool of points, so the server
+    fills the number in at projection time.
+    """
+
+    declared = raw.get("target_mode")
+    looks_targeted = (
+        target_kind != "none"
+        or requires_hostile_target
+        or any(action.kind in TARGET_CONSUMING_ACTIONS for action in actions)
+        or any(key in parameters for key in TARGET_SHAPING_PARAMETER_KEYS)
+    )
+    if declared is None:
+        if looks_targeted:
+            # §4.5.1：作者已经写了"对谁生效"的参数（或挂了一个会读目标的
+            # action），却没说选几个。这里不能替他猜——猜成 single 会让
+            # Abjure Foes 永远只能用 1 个，猜成 up_to 会让圣疗可以选两个。
+            raise ClassFeatureError(
+                f"{capability_id} declares target parameters without a target_mode"
+            )
+        return "self", 1, "", 1
+    mode = str(declared).strip()
+    if mode not in TARGET_MODES:
+        raise ClassFeatureError(
+            f"{capability_id}.target_mode is not a known shape: {mode!r}"
+        )
+    if mode == "self":
+        if "target_cap" in raw:
+            raise ClassFeatureError(
+                f"{capability_id} is a self capability but declares a target_cap"
+            )
+        return "self", 1, "", 1
+
+    ability = str(parameters.get("target_count_ability") or "")
+    if ability and ability not in TARGET_CAP_ABILITIES:
+        raise ClassFeatureError(
+            f"{capability_id}.target_count_ability is not an ability: {ability!r}"
+        )
+    minimum_raw = parameters.get("target_count_minimum", 1)
+    if isinstance(minimum_raw, bool) or not isinstance(minimum_raw, int) or minimum_raw < 1:
+        raise ClassFeatureError(
+            f"{capability_id}.target_count_minimum must be a positive integer"
+        )
+    declared_cap = raw.get("target_cap")
+    if declared_cap is not None:
+        if isinstance(declared_cap, bool) or not isinstance(declared_cap, int) or declared_cap < 1:
+            raise ClassFeatureError(
+                f"{capability_id}.target_cap must be a positive integer"
+            )
+        if ability:
+            # 两个上界只能有一个来源，否则"到底听谁的"就成了运行时问题。
+            raise ClassFeatureError(
+                f"{capability_id} cannot declare both target_cap and target_count_ability"
+            )
+    if mode == "all_in_range":
+        if declared_cap is not None or ability:
+            raise ClassFeatureError(
+                f"{capability_id} is all_in_range: its ceiling is the candidate set, "
+                "not a declaration"
+            )
+        return mode, None, "", 1
+    if mode == "single":
+        if declared_cap not in (None, 1) or ability:
+            raise ClassFeatureError(
+                f"{capability_id} is single: its target_cap must be 1"
+            )
+        return mode, 1, "", 1
+    # up_to
+    if declared_cap is None and not ability:
+        if budget_split:
+            # 预算分配型：能选几个由"每个目标至少 1 点"和池子总额共同决定，
+            # 声明期给不出这个数，投影时由服务端按余量填入。
+            return mode, None, "", minimum_raw
+        raise ClassFeatureError(
+            f"{capability_id} is up_to but declares no target_cap"
+        )
+    return mode, declared_cap, ability, minimum_raw
+
+
+def _parse_target_filter(capability_id: str, raw: Any) -> TargetFilter:
+    """Validate the declared admission filter; unknown keys fail closed."""
+
+    if raw is None:
+        return TargetFilter()
+    if not isinstance(raw, dict):
+        raise ClassFeatureError(f"{capability_id}.target_filter must be an object")
+    unknown = set(raw) - {
+        "side", "must_see", "allow_zero_hp", "allow_dead", "required_condition",
+        "allow_self",
+    }
+    if unknown:
+        raise ClassFeatureError(
+            f"{capability_id}.target_filter has unknown keys: {sorted(unknown)}"
+        )
+    side = str(raw.get("side") or "any")
+    if side not in TARGET_SIDES:
+        raise ClassFeatureError(
+            f"{capability_id}.target_filter.side is not a known side: {side!r}"
+        )
+    flags: dict[str, bool] = {}
+    for key in ("must_see", "allow_zero_hp", "allow_dead", "allow_self"):
+        value = raw.get(key, False)
+        if not isinstance(value, bool):
+            raise ClassFeatureError(
+                f"{capability_id}.target_filter.{key} must be a boolean"
+            )
+        flags[key] = value
+    condition = str(raw.get("required_condition") or "")
+    if condition and not _ID_RE.fullmatch(condition):
+        raise ClassFeatureError(
+            f"{capability_id}.target_filter.required_condition is not a canonical code"
+        )
+    return TargetFilter(
+        side=side,
+        must_see=flags["must_see"],
+        allow_zero_hp=flags["allow_zero_hp"],
+        allow_dead=flags["allow_dead"],
+        required_condition=condition,
+        allow_self=flags["allow_self"],
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class Dnd2024ClassFeatureCatalog:
     """Read-only, validated access to the bundled class feature declarations."""
@@ -723,7 +945,7 @@ class Dnd2024ClassFeatureCatalog:
         capabilities: list[FeatureCapability] = []
         seen_capability_ids: set[str] = set()
         for raw_capability in raw_capabilities:
-            capability = cls._parse_capability(feature_id, raw_capability)
+            capability = cls._parse_capability(feature_id, raw_capability, parameters)
             if capability.id in seen_capability_ids:
                 raise ClassFeatureError(f"{feature_id} declares a duplicate capability")
             seen_capability_ids.add(capability.id)
@@ -746,7 +968,9 @@ class Dnd2024ClassFeatureCatalog:
         )
 
     @classmethod
-    def _parse_capability(cls, feature_id: str, raw: Any) -> FeatureCapability:
+    def _parse_capability(
+        cls, feature_id: str, raw: Any, parameters: Mapping[str, Any],
+    ) -> FeatureCapability:
         if not isinstance(raw, dict):
             raise ClassFeatureError(f"{feature_id} contains an invalid capability")
         capability_id = _require_id(raw.get("id"), f"{feature_id} capability id")
@@ -834,6 +1058,25 @@ class Dnd2024ClassFeatureCatalog:
             raise ClassFeatureError(
                 f"{capability_id}.pool_resource_id is not a canonical id"
             )
+        budget_split = raw.get("budget_split", False)
+        if not isinstance(budget_split, bool):
+            raise ClassFeatureError(f"{capability_id}.budget_split must be a boolean")
+        target_mode, target_cap, target_cap_ability, target_cap_minimum = (
+            _parse_target_shape(
+                capability_id, raw, parameters,
+                target_kind=target_kind,
+                requires_hostile_target=bool(raw.get("requires_hostile_target")),
+                actions=tuple(actions),
+                budget_split=budget_split,
+            )
+        )
+        target_filter = _parse_target_filter(capability_id, raw.get("target_filter"))
+        if budget_split and target_mode == "self":
+            # 一份预算要在目标之间分配，却声明成"不取目标"：这不是可选组合，
+            # 是自相矛盾的声明（§4.5.2）。
+            raise ClassFeatureError(
+                f"{capability_id}.budget_split requires a non-self target_mode"
+            )
         return FeatureCapability(
             id=capability_id,
             feature_id=feature_id,
@@ -847,6 +1090,12 @@ class Dnd2024ClassFeatureCatalog:
             once_per_turn=once_per_turn,
             target_kind=target_kind,
             pool_resource_id=pool_resource_id,
+            target_mode=target_mode,
+            target_cap=target_cap,
+            target_cap_ability=target_cap_ability,
+            target_cap_minimum=target_cap_minimum,
+            target_filter=target_filter,
+            budget_split=budget_split,
         )
 
     def label(self, key: str, default: str = "") -> str:
@@ -927,15 +1176,28 @@ class CombatCapabilityView:
     requires_hostile_target: bool
     costs: tuple[CapabilityCostView, ...]
     target_kind: str = "none"
+    target_mode: str = "self"
+    target_cap: int = 1
+    target_filter: TargetFilter = field(default_factory=TargetFilter)
+    budget_split: bool = False
 
     def to_dict(self) -> dict[str, Any]:
+        # ``requires_target`` 由 target_mode 推出，而不是再读
+        # ``requires_hostile_target``：后者问的是"目标必须敌对吗"，一个
+        # "目标是任意盟友"的能力（Bardic Inspiration）在它上面恒为假，
+        # 投影于是告诉前端"不用选目标"，而校验却要一个合法盟友 —— 界面
+        # 上点不出来就是这么来的。
         return {
             "capability_id": self.id,
             "feature_id": self.feature_id,
             "label": self.name,
             "available": self.available,
             "blocked_reason": self.blocked_reason,
-            "requires_target": self.requires_hostile_target,
+            "requires_target": self.target_mode != "self",
             "target_kind": self.target_kind,
+            "target_mode": self.target_mode,
+            "target_cap": self.target_cap,
+            "target_filter": self.target_filter.to_dict(),
+            "budget_split": self.budget_split,
             "costs": [cost.to_dict() for cost in self.costs],
         }

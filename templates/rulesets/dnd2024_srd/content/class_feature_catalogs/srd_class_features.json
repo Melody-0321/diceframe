@@ -279,6 +279,8 @@
               "id": "bonus_unarmed_strike",
               "cost": {"bonus_action": 1},
               "requires_hostile_target": true,
+              "target_mode": "single",
+              "target_filter": {"side": "enemy"},
               "actions": [{"kind": "unarmed_strike", "count": 1}]
             }
           ]
@@ -312,6 +314,8 @@
               "id": "flurry_of_blows",
               "cost": {"bonus_action": 1, "resources": [{"id": "focus_points", "amount": 1}]},
               "requires_hostile_target": true,
+              "target_mode": "single",
+              "target_filter": {"side": "enemy"},
               "actions": [{"kind": "unarmed_strike", "count": 2}]
             }
           ]
@@ -506,6 +510,8 @@
               "id": "lay_on_hands",
               "target_kind": "creature",
               "pool_resource_id": "lay_on_hands",
+              "target_mode": "single",
+              "target_filter": {"side": "any", "allow_self": true},
               "cost": {"bonus_action": 1},
               "actions": [{"kind": "lay_on_hands", "count": 1}]
             }
@@ -658,6 +664,8 @@
             {
               "id": "abjure_foes",
               "target_kind": "creature",
+              "target_mode": "up_to",
+              "target_filter": {"side": "any", "must_see": true},
               "cost": {
                 "action": 1,
                 "resources": [{"id": "channel_divinity", "amount": 1}]
@@ -1288,6 +1296,8 @@
               "id": "bardic_inspiration",
               "cost": {"bonus_action": 1, "resources": [{"id": "bardic_inspiration", "amount": 1}]},
               "requires_hostile_target": false,
+              "target_mode": "single",
+              "target_filter": {"side": "ally", "must_see": true},
               "actions": [{"kind": "bardic_grant", "count": 1}]
             }
           ]
@@ -1671,6 +1681,8 @@
             {
               "id": "divine_spark",
               "target_kind": "creature",
+              "target_mode": "single",
+              "target_filter": {"side": "any", "must_see": true},
               "cost": {
                 "action": 1,
                 "resources": [{"id": "channel_divinity", "amount": 1}]
@@ -1680,6 +1692,8 @@
             {
               "id": "turn_undead",
               "target_kind": "undead",
+              "target_mode": "all_in_range",
+              "target_filter": {"side": "any"},
               "cost": {
                 "action": 1,
                 "resources": [{"id": "channel_divinity", "amount": 1}]
@@ -1719,6 +1733,14 @@
             {
               "id": "preserve_life",
               "target_kind": "bloodied_creature",
+              "target_mode": "up_to",
+              "budget_split": true,
+              "target_filter": {
+                "side": "any",
+                "allow_self": true,
+                "allow_zero_hp": true,
+                "required_condition": "bloodied"
+              },
               "cost": {
                 "action": 1,
                 "resources": [{"id": "channel_divinity", "amount": 1}]
