@@ -438,6 +438,13 @@ class CombatReducerMixin:
                 raise EventBatchError(f"class resource is not initialized: {resource_id}")
             current = int(state.get("current", 0) or 0)
             amount = int(event.get("amount", 1) or 1)
+            # 扣减只接受正整数。负数曾是唯一能"加"资源的写法：`current < amount`
+            # 对它恒假，`current - (-5)` 反把次数加上去（S0-F18 §4.1.3 要求
+            # 拒绝伪造次数）。事件是信任边界，形状不对就整批拒绝。
+            if amount < 1:
+                raise EventBatchError(
+                    f"class resource amount must be a positive integer: {resource_id}"
+                )
             if current < amount:
                 raise EventBatchError(f"class resource is already spent: {resource_id}")
             state["current"] = current - amount
