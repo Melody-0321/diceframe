@@ -511,7 +511,9 @@
               "target_kind": "creature",
               "pool_resource_id": "lay_on_hands",
               "target_mode": "single",
-              "target_filter": {"side": "any", "allow_self": true},
+              "target_filter": {
+                "side": "any", "allow_self": true, "allow_zero_hp": true
+              },
               "cost": {"bonus_action": 1},
               "actions": [{"kind": "lay_on_hands", "count": 1}]
             }
@@ -1682,7 +1684,9 @@
               "id": "divine_spark",
               "target_kind": "creature",
               "target_mode": "single",
-              "target_filter": {"side": "any", "must_see": true},
+              "target_filter": {
+                "side": "any", "must_see": true, "allow_zero_hp": true
+              },
               "cost": {
                 "action": 1,
                 "resources": [{"id": "channel_divinity", "amount": 1}]

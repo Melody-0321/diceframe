@@ -681,6 +681,11 @@ def _parse_target_shape(
         or requires_hostile_target
         or any(action.kind in TARGET_CONSUMING_ACTIONS for action in actions)
         or any(key in parameters for key in TARGET_SHAPING_PARAMETER_KEYS)
+        # 目标形状的三个键本身也说明作者在声明"对谁生效"：只写 ``target_cap``
+        # 或 ``target_filter`` 却不写 ``target_mode``，与只写射程参数是同一件
+        # 事（§4.5.1）—— 不能被当成 self 静默放行。
+        or any(key in raw for key in ("target_cap", "target_filter"))
+        or bool(raw.get("budget_split"))
     )
     if declared is None:
         if looks_targeted:

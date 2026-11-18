@@ -450,6 +450,189 @@ def test_legacy_scalar_target_still_resolves(sheets) -> None:
     assert resolved["ok"] is True, resolved
 
 
+def test_a_zero_hp_ally_is_offered_and_accepted(sheets) -> None:
+    """§4.4.3：服务端接受的目标，界面必须也提供。
+
+    Divine Spark 的契约写的是"你能看见的另一生物"，倒地队友正是最需要这一发的
+    时候。校验侧早就允了 0 HP，但 ``target_filter`` 漏了 ``allow_zero_hp``，
+    候选集把队友判成 ``zero_hp`` 非法 —— 于是服务端能结算、界面永远不给选。
+    """
+
+    engine, instance = _setup(sheets["cleric5"])
+    _start(engine, instance, enemies=[_enemy()])
+    _add_ally(instance, sheets["paladin9"])
+    _set_hp(instance, "player:ally", 0)
+    _to_turn(engine, instance, "player:gm")
+
+    entry = _capability_entry(engine, instance, "divine_spark")
+    legal = {row["actor_id"] for row in entry["candidates"] if row["legal"]}
+    assert "player:ally" in legal, entry["candidates"]
+
+    resolved = _capability(
+        engine, instance, "divine_spark", dice=[6],
+        target_ids=["player:ally"], spark_mode="heal",
+    )
+    assert resolved["ok"] is True, resolved
+
+
+def test_lay_on_hands_offers_a_zero_hp_ally(sheets) -> None:
+    """圣疗是"把队友从死亡豁免里拉起来"的那只手，0 HP 必须在候选集里。
+
+    与 Divine Spark 同因：校验只拦 ``dead``，候选集却按 ``allow_zero_hp`` 默认假
+    把 0 HP 判非法。区别是圣疗没有法术可见性路径，界面连"为什么不能选"都看不到。
+    """
+
+    engine, instance = _setup(sheets["paladin9"])
+    _start(engine, instance, enemies=[_enemy()])
+    _add_ally(instance, sheets["paladin9"])
+    _set_hp(instance, "player:ally", 0)
+
+    entry = _capability_entry(engine, instance, "lay_on_hands")
+    legal = {row["actor_id"] for row in entry["candidates"] if row["legal"]}
+    assert "player:ally" in legal, entry["candidates"]
+
+    resolved = _capability(
+        engine, instance, "lay_on_hands", [], target_ids=["player:ally"],
+        healing_amount=3,
+    )
+    assert resolved["ok"] is True, resolved
+
+
+def test_a_dead_creature_is_refused_by_the_validator_too(sheets) -> None:
+    """``allow_dead`` 没声明：候选集排除尸体，校验也必须排除。
+
+    只改一侧会留下"服务端接受、界面不提供"的分叉，正是本切片要消灭的形态。
+    """
+
+    engine, instance = _setup(sheets["cleric5"])
+    _start(engine, instance, enemies=[_enemy()])
+    _add_ally(instance, sheets["paladin9"])
+    sheet = instance.players["ally"]["character_sheet"]
+    sheet["ruleset_character"].setdefault("conditions", {})["dead"] = {"source": "test"}
+    _to_turn(engine, instance, "player:gm")
+
+    entry = _capability_entry(engine, instance, "divine_spark")
+    legal = {row["actor_id"] for row in entry["candidates"] if row["legal"]}
+    assert "player:ally" not in legal
+
+    resolved = _capability(
+        engine, instance, "divine_spark", dice=[6],
+        target_ids=["player:ally"], spark_mode="heal",
+    )
+    assert resolved["ok"] is False
+    assert "dead" in resolved["error"]
+
+
+def test_turn_undead_ignores_a_dead_undead_in_range(sheets) -> None:
+    """``all_in_range`` 的"候选集即提交集"必须用同一份"谁算合法"。
+
+    候选集按 ``allow_dead=False`` 排除带 ``dead`` 条件的行；校验侧的
+    ``_is_living_undead`` 若只看 HP，这只 hp>0 的尸体会进 ``in_reach`` 而不进
+    候选集，集合恒不相等 —— 能力不是拒绝这只，而是整条永远提交不了。
+    """
+
+    engine, instance = _setup(sheets["cleric5"])
+    _start(engine, instance, enemies=[
+        _enemy(creature_type="undead", hp=80, position=5),
+        _enemy(creature_type="undead", hp=80, position=10, enemy_id="goblin-2"),
+    ])
+    _combat(instance)["enemies"]["goblin-2"]["conditions"] = {"dead": {"source": "test"}}
+    _to_turn(engine, instance, "player:gm")
+
+    entry = _capability_entry(engine, instance, "turn_undead")
+    legal = {row["actor_id"] for row in entry["candidates"] if row["legal"]}
+    assert legal == {"enemy:goblin-1"}
+
+    resolved = _capability(
+        engine, instance, "turn_undead", [3, 7], target_ids=["enemy:goblin-1"],
+    )
+    assert resolved["ok"] is True, resolved
+
+
+def test_a_legacy_scalar_target_reaches_the_resolution(sheets) -> None:
+    """旧意图只带标量时，校验与结算必须读到同一批目标。
+
+    ``_declared_target_ids`` 两种形状都读，所以校验会放行一个只带 ``target_id``
+    的 Abjure Foes（旧客户端就是这么发的）；结算侧的 Turn Undead / Abjure 分支
+    过去只认 ``target_ids``，同一份意图于是"校验通过、结算 0 个目标"—— 一次
+    Channel 花掉，一张豁免都不掷。
+    """
+
+    engine, instance = _setup(sheets["paladin9"])
+    _start(engine, instance, enemies=_two_enemies())
+    _to_turn(engine, instance, "player:gm")
+    resolved = engine.resolve_intent(instance, _intent(
+        instance, type="class_capability", capability_id="abjure_foes",
+        target_id="enemy:goblin-1",
+    ), SequenceRng([3, 3]))
+    assert resolved["ok"] is True, resolved
+    events = resolved["event_batch"]["events"]
+    assert len(_of_type(events, "check.resolved")) == 1
+    assert [row["amount"] for row in _of_type(
+        events, "dnd2024.class_resource.spent",
+    )] == [1]
+
+
+def test_a_budget_split_capability_without_candidates_is_unavailable(sheets) -> None:
+    """§4.5.3 不为预算型开口子：池子还在，但没人可治时同样标不可用。
+
+    Preserve Life 的候选人必须 Bloodied。全员满血的遭遇里候选集为空，而它的
+    ``budget_split`` 曾让投影跳过"候选为空即不可用"这条 —— 界面于是给出一个
+    点了必然被拒的能力：上界 0、提交必失败。
+    """
+
+    engine, instance = _setup(sheets["cleric9"])
+    _start(engine, instance, enemies=[_enemy()])
+    _to_turn(engine, instance, "player:gm")
+
+    entry = _capability_entry(engine, instance, "preserve_life")
+    assert entry["candidates"], "全员满血也应有行，只是每条都非法"
+    assert all(row["legal"] is False for row in entry["candidates"])
+    assert entry["available"] is False
+    assert entry["blocked_reason"]
+
+
+def test_a_shape_key_without_a_mode_fails_closed() -> None:
+    """§4.5.1：只写 ``target_cap`` 却不写 ``target_mode``，不能当 self 静默放行。
+
+    射程参数走的是 ``parameters``，但 ``target_cap`` / ``target_filter`` 是能力
+    自身的键；只看前者，一份"写了上界没写形状"的声明会被当成 self，上界被丢掉。
+    """
+
+    from src.rulesets.dnd2024.features.models import _parse_target_shape
+
+    with pytest.raises(ClassFeatureError):
+        _parse_target_shape(
+            "demo", {"target_cap": 2}, {}, target_kind="none",
+            requires_hostile_target=False, actions=(), budget_split=False,
+        )
+
+
+def test_side_self_admits_only_the_actor() -> None:
+    """§4.1.3 的 ``side: "self"`` 是"只有本人"，不是一次阵营比较。
+
+    actor 行自己的 ``side`` 是 ``party``；若把它交给 ``_side_code`` 去比，本人
+    也会被判成非法，能力永远没有候选（"能表达、界面不可达"的另一种写法）。
+    """
+
+    from src.rulesets.dnd2024.features.combat import target_candidates
+    from src.rulesets.dnd2024.features.models import TargetFilter
+
+    rows = [
+        {"actor_id": "player:gm", "name": "Bo", "side": "party", "hp": 10},
+        {"actor_id": "player:ally", "name": "Al", "side": "party", "hp": 10},
+        {"actor_id": "enemy:goblin-1", "name": "Brute", "side": "enemy", "hp": 10},
+    ]
+    candidates = target_candidates(
+        TargetFilter(side="self"), actor_id="player:gm", rows=rows, range_ft=None,
+    )
+    legal = [row["actor_id"] for row in candidates if row["legal"]]
+    assert legal == ["player:gm"]
+    reasons = {row["actor_id"]: row["reason"] for row in candidates}
+    assert reasons["player:ally"] == "wrong_side"
+    assert reasons["enemy:goblin-1"] == "wrong_side"
+
+
 def test_known_gaps(sheets) -> None:
     """Preserve Life 的前端预算分配仍未实现 —— 本切片只保证服务端可表达。
 

@@ -766,6 +766,11 @@ class CombatValidationMixin:
         view = self._actor_view(instance, combat, actor_id)
         if int(view.get("hp", 0) or 0) <= 0:
             return False
+        # 候选集用 ``allow_dead=False`` 把带 ``dead`` 条件的行判成非法；这里
+        # 若只看 HP，一个 hp>0 却已被标记死亡的行会进 ``in_reach`` 而不进候选集，
+        # 于是 ``set(targets) != in_reach`` 恒真 —— Turn Undead 永远提交不了。
+        if "dead" in (view.get("conditions") or {}):
+            return False
         return "undead" in str(view.get("creature_type") or "").lower()
 
     def _capability_range(
@@ -834,6 +839,11 @@ class CombatValidationMixin:
         # 没有"必须活着"。用 living 当门槛会把倒地队友挡在外面。
         if not self._spell_target_visible(instance, combat, actor, target):
             raise CombatIntentError("Divine Spark targets a creature you can see")
+        # 允许 0 HP 不等于允许尸体。候选集按 ``allow_dead``（未声明即假）把
+        # ``dead`` 判成非法，校验必须给出同一个答案，否则服务端会接受一个
+        # 界面永远不会提供的目标（S0-F39 §4.4.3）。
+        if "dead" in (target.get("conditions") or {}):
+            raise CombatIntentError("Divine Spark cannot target a dead creature")
         self._require_range(
             combat, str(actor["actor_id"]), target_id,
             self._capability_range(actor, capability, "spark_target_range_ft", 30),

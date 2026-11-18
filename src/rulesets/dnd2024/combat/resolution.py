@@ -3843,10 +3843,15 @@ class CombatResolutionMixin:
         # 例外。下面这些结算函数（攻击链、神圣火花、圣疗、诗人激励）历史上都
         # 读标量 ``target_id``，而它们与法术链共用同一份实现，所以在这里把
         # 数组归一化成标量一次，而不是让每个结算分支各读一种形状。
-        if not intent.get("target_id"):
-            declared = self._declared_target_ids(intent)
-            if len(declared) == 1:
-                intent = {**intent, "target_id": declared[0]}
+        # 反方向也要归一：旧意图与旧存档重放只带标量，而 Turn Undead /
+        # Abjure Foes 的结算分支只读数组 —— 若只补 ``target_id``，校验侧
+        # （``_declared_target_ids`` 两种形状都读）会放行一个结算时读不到目标的
+        # 意图，多目标能力于是静默结算 0 个。
+        declared = self._declared_target_ids(intent)
+        if declared and not intent.get("target_ids"):
+            intent = {**intent, "target_ids": list(declared)}
+        if declared and not intent.get("target_id") and len(declared) == 1:
+            intent = {**intent, "target_id": declared[0]}
         capability = self.features.declared_capability(
             self._feature_character(actor), capability_id,
         )

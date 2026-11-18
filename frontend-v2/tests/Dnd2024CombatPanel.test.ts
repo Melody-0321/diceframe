@@ -1851,7 +1851,8 @@ describe('D&D 2024 combat panel class capabilities', () => {
       type: 'class_capability',
       actor_id: 'player:gm',
       capability_id: 'flurry_of_blows',
-      target_id: 'enemy:goblin-1',
+      // S0-F39 §4.4.1：目标一律走数组，单目标也不再用标量 target_id。
+      target_ids: ['enemy:goblin-1'],
     })
     // 服务端在同一份响应里返回新状态：专注点与附赠动作立即刷新，无需重新加载。
     expect(wrapper.get('.class-resource-strip').text()).toContain('1 / 2')

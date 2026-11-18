@@ -411,9 +411,10 @@ class Dnd2024CombatEngine(
                 entry["targets"] = projection["legal_rows"]
                 if "budget" in projection:
                     entry["budget"] = projection["budget"]
-                if not entry["targets"] and not capability.budget_split:
+                if not entry["targets"]:
                     # 候选集为空：能力仍然列出来（玩家要能看到"为什么不能用"），
-                    # 但不允许提交一个空目标数组。
+                    # 但不允许提交一个空目标数组。预算型（Preserve Life）不例外
+                    # —— 没有合法候选时它同样提交不了，§4.5.3 不为它开口子。
                     entry["available"] = False
                     entry["blocked_reason"] = "no legal target is in range"
             actions.append(entry)

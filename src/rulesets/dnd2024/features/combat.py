@@ -242,6 +242,17 @@ def target_candidates(
     candidates: list[dict[str, Any]] = []
     for row in rows:
         target_id = str(row.get("actor_id") or "")
+        if target_filter.side == "self":
+            # ``side: "self"`` 的语义是"只有施法者本人"，不是阵营比较：actor
+            # 行自己的 side 是 ``party``，用 ``_side_code`` 去比会把本人也判成
+            # 非法，于是能力永远没有候选。它也隐含 ``allow_self``。
+            candidates.append({
+                "actor_id": target_id,
+                "name": str(row.get("name") or target_id),
+                "legal": target_id == actor_id,
+                "reason": "" if target_id == actor_id else "wrong_side",
+            })
+            continue
         if target_id == actor_id and not target_filter.allow_self:
             # 自己默认不是候选：这条规则以前写在每个校验函数里，前端看不到，
             # 于是"你自己"出现在下拉框里、点了才被拒。
@@ -273,7 +284,7 @@ def _candidate_rejection(
         if required_creature_type not in actual:
             return "wrong_kind"
     side = target_filter.side
-    if side != "any" and str(row.get("side") or "") != _side_code(side):
+    if side not in {"any", "self"} and str(row.get("side") or "") != _side_code(side):
         return "wrong_side"
     if range_ft is not None:
         distance = row.get("distance")

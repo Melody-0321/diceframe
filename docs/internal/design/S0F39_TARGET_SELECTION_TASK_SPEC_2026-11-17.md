@@ -83,7 +83,8 @@
    升级加量用 `upcast_target_count`）。
 3. `target_filter`：`side`（`self` / `ally` / `enemy` / `any`）、`must_see`（布尔）、
    `allow_zero_hp`（布尔）、`allow_dead`（布尔）、`required_condition`（可选，例如
-   Preserve Life 的 `bloodied`）。
+   Preserve Life 的 `bloodied`）。`side: "self"` 表示**只有施法者本人**，它隐含
+   `allow_self`，不是一次阵营比较（actor 行自己的 `side` 是 `party`）。
 4. `budget_split`：布尔。为真时该能力还需要在目标之间分配一份预算。
 
 ### 4.2 数量语义（本切片的裁决点）
@@ -91,8 +92,10 @@
 1. `up_to` 只约束上界：提交数量 `1 <= n <= cap` 合法，`n > cap` 或 `n == 0` 拒绝。
 2. `all_in_range` 不接受玩家挑选：候选集即提交集，`n` 由服务端算出，至少为 1 才可提交。
 3. `single` 等价于 `up_to` 且 `cap == 1`。
-4. 上界为 0（属性调整值算出 0 且没有最小值）时，`up_to` 能力不可用，`available` 为假，
-   `blocked_reason` 说明原因。
+4. 上界恒 ≥1：`target_count_minimum` 与 `target_cap` 在装载期都要求正整数，
+   `resolve_target_cap` 取 `max(minimum, modifier)`，所以不存在"最多 0 个目标"的能力。
+   该函数返回 0 只表示"由投影填"（`all_in_range` 取合法候选数、`budget_split` 取预算余量），
+   不是上界为零 —— 这两种形状的可用性由"候选集是否为空"决定（§4.5.3）。
 5. 少选不补偿：选择 2 个而不是 3 个时，不返还资源、不折算伤害，事件按实际目标数各落一条。
 
 ### 4.3 服务端投影（前端不做规则判断）
@@ -101,9 +104,10 @@
 
 - `target_mode`、`target_cap`（**已解析成整数**，前端不得自己算属性调整值）
 - `requires_target`：`target_mode != "self"`
-- `candidates`：`{actor_id, name, legal, reason}` 的列表，`reason` 为人类可读原因
-  （`out_of_range` / `cannot_see` / `wrong_side` / `dead` / `zero_hp` /
-  `not_bloodied` / `already_affected`）
+- `candidates`：`{actor_id, name, legal, reason}` 的列表，`reason` 为机器可读原因
+  （`out_of_range` / `cannot_see` / `wrong_side` / `wrong_kind` / `dead` / `zero_hp` /
+  `not_bloodied` / `already_affected`）。`wrong_kind` 是 `target_kind` 造成的排除
+  （Turn Undead 的活人），与 `wrong_side` 分开：前者是"什么样的生物"，后者是"哪一边"。
 - `budget`：`budget_split` 为真时给出可分配总额与每个目标的剩余可接收量，否则省略
 
 投影必须是纯读：同一次请求里连续取两次结果一致，且不推进任何时钟。

@@ -457,6 +457,11 @@ watch(
     capabilityTargetIds.value = Array.from(
       { length: slots }, (_unused, index) => kept[index] || '',
     )
+    // 只有一个合法目标时直接选中：让玩家再点一次战场没有任何信息增益，而且
+    // 界面上唯一的候选早已由服务端判定为合法。多处选择仍然留给玩家。
+    if (capabilityTargetIds.value.length === 1 && !capabilityTargetIds.value[0] && legal.length === 1) {
+      capabilityTargetIds.value = [legal[0]]
+    }
   },
   { immediate: true },
 )
@@ -1177,9 +1182,6 @@ function describeEvent(event: JsonObject): string {
   if (type === 'resource.changed') {
     return `${targetName(String(event.target_id || ''))} HP ${Number(event.delta || 0) > 0 ? '+' : ''}${event.delta}`
   }
-  // 回合开始窗口的关闭是记账，不是玩家做过的事；回退分支会把裸类型名
-  // 打进战报，于是 Monk 18 每回合第一件事都会留一行英文。
-  if (type === 'dnd2024.turn_window.closed') return ''
   return type.replace(/^dnd2024\./, '')
 }
 

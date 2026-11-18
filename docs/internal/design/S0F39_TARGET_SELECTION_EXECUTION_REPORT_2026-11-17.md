@@ -335,3 +335,75 @@ rebase 后核对两件事：
 merge-base 各自干净（也省掉评审时「这条 PR 为什么带着别人的 15 个文件」这一问）。
 
 
+## 10. 切面审核（2026-11-17 23:20 起）
+
+按 `PROTOCOL.md` 开包：base `34bb632b`、head `7e88dad1`、20 条 claim、18 个改动文件、
+7 个面。实跑三面（`quote` / `carry` / `cover`），`counter` / `txn` / `single` / `uniq`
+按 `CONDUCTOR.md` §一·c 的价值排序未派。合并结果：
+`pass 13 / fail 16`，`07-review.tsv` 过 `review_check.py`（29 行）。
+
+### 10.1 逐条处置
+
+| claim | 缺陷 | 处置 |
+|---|---|---|
+| 4.1.3 | `target_filter.side="self"` 被 `_side_code` 当阵营比，本人判 `wrong_side` | 修：`target_candidates` 先判 `side == "self"`，只放本人；契约补一句"隐含 `allow_self`" |
+| 4.2.2 | `_is_living_undead` 只看 HP，候选集看 `dead` → Turn Undead 集合恒不等 | 修：加 `dead` 条件判断；新增 `test_turn_undead_ignores_a_dead_undead_in_range` |
+| 4.2.4 | 「上界为 0 时不可用」无落点：装载期禁止 `minimum<1`、`cap<1` | **改契约**：上界恒 ≥1；`resolve_target_cap` 返回 0 只表示「由投影填」 |
+| 4.3.3 | 实现新增 `wrong_kind` 未进 `reason` 词表 | 改契约：词表补 `wrong_kind`，并说明它与 `wrong_side` 的分工 |
+| 4.4.1 | 结算只做 `target_ids`→`target_id`，反方向不补 → 只带标量的 Abjure 校验过、结算 0 个 | 修：`resolution` 双向归一；新增 `test_a_legacy_scalar_target_reaches_the_resolution` |
+| 4.4.3 | `divine_spark` / `lay_on_hands` 漏 `allow_zero_hp`：界面永不提供、服务端照收 | 修：两处声明补 `allow_zero_hp`；`divine_spark` 补 `dead` 拒绝；新增两条用例 |
+| 4.5.1 | `target_cap` / `target_filter` 不在 `looks_targeted` 里，写了上界不写形状会静默成 `self` | 修：三键纳入判定；新增 `test_a_shape_key_without_a_mode_fails_closed` |
+| 4.5.3 | `available=False` 带 `and not budget_split`，全员满血时 Preserve Life 仍「可用」 | 修：去掉例外；新增 `test_a_budget_split_capability_without_candidates_is_unavailable` |
+| extra-cover-2 | 两个 locale 各带一行 `turn_start`（报告 §4 自己列为「提交时必须排除」） | 修：撤出。拆分时整文件复制把别条切片的行带了进来 |
+| extra-cover-3 | `noCapabilityTarget` 仍是「敌对目标」，盟友/自身为目标的能力提示错误 | 修：改中性「当前没有可指定的目标」/ `No target is available` |
+| extra-cover-7 | 面板 `describeEvent` 夹带 `turn_window.closed` 静默分支 | 修：撤出（同属整文件复制带入） |
+| extra-cover-1 | 五个 `[白名单外]` 文件在 §5 与 §11.5 都没有说法 | 修文档：见 §10.2 |
+| extra-cover-4 / 5 | 同 4.4.3 / 4.2.2（同一缺陷的不同面报告） | 同 4.4.3 / 4.2.2 |
+| extra-cover-6 | 静态审计红：`check_windows.py` 里没有 `_REROLL_REPLACED_FIELDS` | **不属本切片**：该符号只存在于未提交的 F20–F24 残余修正里；审计脚本按那份状态写，在纯 F38+F39 树上必红 |
+| extra-carry-1 | `_reroll_check` 的 keep 白名单漏 `check_penalty`，重掷丢掉惩罚 | **不属本切片**：同在残余修正里；本切片不碰重掷 |
+
+修完复跑：
+
+| 检查 | 结果 |
+|---|---|
+| `test_dnd2024_target_selection.py` | **29 passed**（原 21，本轮新增 8 条，每处修复都有锁） |
+| `tests/rulesets` 全量（`-n 6 --dist loadfile`） | **2467 passed / 0 failed**，640s |
+| `ruff check src/` / `mypy` | 干净 |
+| 前端 `vitest run`（全量） | **225 files / 1655 tests passed** |
+| `vue-tsc -b` / `eslint src tests` | 干净 |
+| `tests/`（rulesets 之外） | **7502 passed / 11 failed / 3 errors**；11+3 全在本机基线：`docker_launcher` 6、`docker_data_generation` 1、`docker_runtime_v1_upgrade` 3 errors、`launcher_lifecycle` 1、`ai_combat_choices` 1、`updater` 的 MAX_PATH 1（sandbox 路径 shim）、`external_adventure_import` 的 PDF 文本层 1（缺本地依赖） |
+
+2467 − 2459 = 8，正是新增的用例数：修复没有改动任何既有行为，只补上了契约缺口。
+
+### 10.4 前端两条（面级审核没覆盖到，靠跑用例才现形）
+
+跑 `Dnd2024CombatPanel.test.ts` 时 78 条里挂 1 条，用基线（`34bb632b` 的三个前端文件）
+对照后确认是本切片引入，两条都要修：
+
+| 缺陷 | 处置 |
+|---|---|
+| 重写选目标后丢掉了「只有一个合法候选时自动选中」：只有一个目标的能力也必须先去战场点一下，否则确认按钮永远不出 | 修：`watch` 在合法候选恰好 1 个且槽位为空时直接选中。多候选仍由玩家挑（批量自动勾选会替玩家做决定） |
+| 面板用例断言提交体里是标量 `target_id`，而 §4.4.1 要求一律用数组 | 改用例：断言 `target_ids: ['enemy:goblin-1']`。**这是契约变更，不是为了让测试变绿**——旧断言锁的是被本切片作废的形状 |
+
+第二条值得记下来：**这个切片自称"面板用例 78 条"，但没有一条被跑过**（前端依赖在另一个工作树，
+审核窗口里 `node_modules` 是空的）。面级审核只能读源码，读不出"测试期望还停在旧契约"。
+
+### 10.2 白名单外的五个文件（补记）
+
+任务书 §5 只列了 9 个文件，实际必要的还有 5 个，理由逐条如下（下一轮任务书应在 §5 直接
+给这类共享契约文件默认授权，见 `BATCH_PLAN.md` 的流程债建议）：
+
+| 文件 | 为什么必须改 |
+|---|---|
+| `combat/engine.py` | 投影入口：`entry` 里写 `target_cap` / `candidates` / `targets` / `budget`，并把空候选集标成不可用 |
+| `combat/resolution.py` | 结算侧把 `target_ids` 与旧标量 `target_id` 双向归一，否则多目标能力会「校验通过、结算 0 个」 |
+| `features/resolver.py` | 投影需要属性调整值（`ability_modifiers`），属性分属于角色层，只能在 resolver 取值后传入 |
+| `combatCopy.ts` | 新增 `capabilityBudgetUnsupported` 文案 + 把 `noCapabilityTarget` 改成中性 |
+| `test_dnd2024_channel_control.py` | 原来那条「少选即拒」的用例必须跟着裁决改，否则它锁的是被本切片作废的旧口径 |
+
+### 10.3 本轮不修、登记为残余
+
+1. **静态审计红**（`_REROLL_REPLACED_FIELDS`）：等 F20–F24 残余修正提交后自然消失。
+2. **`_reroll_check` 漏 `check_penalty`**：同上，属重掷整改那条线。
+3. **四个低价值面未派**（`counter` / `txn` / `single` / `uniq`）：本轮先修 fail；补派与否
+   见 §8 第 2 条（预算型每人至少 1 点）落地时一并做。
